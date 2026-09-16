@@ -24,16 +24,6 @@ st.set_page_config(
     layout="wide",
 )
 
-REQUIRED_COLUMNS = [
-    "Data",
-    "Chamado",
-    "Motivo",
-    "Status",
-    "Tempo_Espera_Min",
-    "Tempo_Atendimento_Min",
-    "Resolvido_N1",
-]
-
 
 # ---------------------------------------------------------------------------
 # FUNÇÕES AUXILIARES
