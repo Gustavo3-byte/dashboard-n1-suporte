@@ -30,8 +30,7 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner="Processando arquivo carregado...")
 def load_data(file):
-    """Lê o arquivo enviado (csv ou xlsx) e retorna um DataFrame bruto."""
-    nome = file.name.lower()
+   
     if nome.endswith(".csv"):
         try:
             df = pd.read_csv(file, sep=None, engine="python")
