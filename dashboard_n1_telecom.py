@@ -1,16 +1,18 @@
 """
-Dashboard de Suporte N1 - Telecom (v2)
+Dashboard de Suporte N1 - Telecom (v3)
 ======================================
-Ferramenta web de relatórios automáticos e dashboard interativo para
-squads de atendimento Nível 1 (N1) de Telecom.
+Adaptado ao export real da plataforma (id, protocolo, Solicitante,
+Assunto, Data, Setor, Analista, Urgência, Interno, Status, Data Encerrado).
 
-Principais melhorias desta versão:
-  - Reconhece automaticamente as colunas reais do export (id/protocolo,
-    Assunto, Data, Status, Analista, etc.) via mapeamento por sinônimos.
-  - KPIs e gráficos se adaptam ao que existe na base.
-  - Mantém compatibilidade retroativa: se um dia o export trouxer
-    Tempo_Espera_Min, Tempo_Atendimento_Min e/ou Resolvido_N1, esses
-    indicadores (TME, TMA, FCR) são calculados automaticamente.
+Recursos:
+  - Reconhecimento automático de colunas por sinônimos.
+  - KPIs adaptativos: só aparece o que faz sentido com os dados.
+  - TMA real calculado quando há "Data Encerrado".
+  - Taxa de Resolução N1, Taxa de Cancelamento, Ranking de Analistas,
+    Top Assuntos, Distribuição de Status, Evolução temporal e
+    Heatmap Hora × Dia da Semana.
+  - Compatibilidade retroativa com exports que tragam Tempo_Espera_Min,
+    Tempo_Atendimento_Min e Resolvido_N1.
 
 Como executar:
     pip install streamlit pandas plotly openpyxl
@@ -23,6 +25,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 
@@ -37,67 +40,64 @@ st.set_page_config(
 
 
 # ---------------------------------------------------------------------------
-# MAPEAMENTO DE CAMPOS CANÔNICOS -> SINÔNIMOS ACEITOS
+# MAPEAMENTO DE CAMPOS CANÔNICOS -> SINÔNIMOS
 # ---------------------------------------------------------------------------
-# A chave é o "nome canônico" usado internamente pelo dashboard.
-# Os valores são listas de padrões (regex, case-insensitive) que serão
-# testados contra os nomes das colunas do arquivo carregado.
 FIELD_SYNONYMS = {
     "Data": [
-        r"^data(\s|_|$)", r"^data.*hora", r"^data.*abertura", r"^abertura",
-        r"^criado", r"^created", r"^timestamp", r"^dt_", r"_dt$", r"^inicio",
-        r"^início", r"^solicitacao", r"^solicitação",
+        r"^data$", r"^data_abertura", r"^data_criacao", r"^abertura",
+        r"^criado_em", r"^timestamp", r"^dt_", r"_dt$", r"^inicio",
+    ],
+    "Data_Encerrado": [
+        r"^data_encerrado", r"^data_fechamento", r"^data_conclusao",
+        r"^data_finalizacao", r"^fechado_em", r"^closed_at", r"^encerrado",
     ],
     "Chamado": [
-        r"^chamado", r"^ticket", r"^id", r"^protocolo", r"^numero", r"^número",
-        r"^os$", r"^ordem", r"^codigo", r"^código", r"^interacao", r"^interação",
+        r"^id$", r"^chamado", r"^ticket", r"^numero", r"^os$", r"^codigo",
+    ],
+    "Protocolo": [
+        r"^protocolo", r"^protocol$", r"^numero_protocolo",
+    ],
+    "Solicitante": [
+        r"^solicitante", r"^cliente", r"^customer", r"^assinante", r"^conta",
     ],
     "Motivo": [
-        r"^motivo", r"^assunto", r"^categoria", r"^tipo", r"^topico", r"^tópico",
-        r"^classificacao", r"^classificação", r"^servico", r"^serviço",
-        r"^descricao", r"^descrição", r"^problema",
+        r"^assunto", r"^motivo", r"^categoria", r"^tipo", r"^topico",
+        r"^classificacao", r"^problema",
     ],
-    "Status": [
-        r"^status", r"^situacao", r"^situação", r"^estado", r"^state",
+    "Setor": [
+        r"^setor", r"^departamento", r"^fila", r"^grupo",
     ],
     "Analista": [
-        r"^analista", r"^atendente", r"^operador", r"^agente", r"^responsavel",
-        r"^responsável", r"^usuario", r"^usuário", r"^owner", r"^assigned",
-        r"^tecnico", r"^técnico",
+        r"^analista", r"^atendente", r"^operador", r"^agente",
+        r"^responsavel", r"^tecnico", r"^owner", r"^assigned",
+    ],
+    "Status": [
+        r"^status$", r"^situacao", r"^estado", r"^state",
+    ],
+    "Urgencia": [
+        r"^urgencia", r"^prioridade", r"^priority", r"^severidade",
+    ],
+    "Interno": [
+        r"^interno", r"^internal", r"^is_internal",
     ],
     "Resolvido_N1": [
-        r"^resolvido", r"^resolvido_n1", r"^fcr", r"^resolucao", r"^resolução",
-        r"^solucionado", r"^primeiro_nivel", r"^primeiro_nível",
+        r"^resolvido", r"^resolvido_n1", r"^fcr", r"^solucionado",
     ],
     "Tempo_Espera_Min": [
-        r"^tempo_espera", r"^tempo_espera_min", r"^tme", r"^espera",
-        r"^wait_time", r"^waiting", r"^fila",
+        r"^tempo_espera", r"^tme", r"^espera", r"^wait_time", r"^fila",
     ],
     "Tempo_Atendimento_Min": [
-        r"^tempo_atendimento", r"^tempo_atendimento_min", r"^tma",
-        r"^duracao", r"^duração", r"^handle_time", r"^aht",
-    ],
-    "Prioridade": [
-        r"^prioridade", r"^priority", r"^severidade", r"^urgencia", r"^urgência",
-    ],
-    "Canal": [
-        r"^canal", r"^channel", r"^origem", r"^fonte", r"^midia", r"^mídia",
-    ],
-    "Cliente": [
-        r"^cliente", r"^customer", r"^contrato", r"^assinante", r"^conta",
+        r"^tempo_atendimento", r"^tma", r"^duracao", r"^aht", r"^handle_time",
     ],
 }
 
-# Campos mínimos obrigatórios para o dashboard funcionar.
-# (Data é indispensável; os demais são opcionais e habilitam KPIs/gráficos.)
 CAMPO_MINIMO_OBRIGATORIO = "Data"
 
 
 # ---------------------------------------------------------------------------
-# FUNÇÕES DE APOIO À DETECÇÃO DE COLUNAS
+# NORMALIZAÇÃO E DETECÇÃO DE COLUNAS
 # ---------------------------------------------------------------------------
-def _normalizar(texto: str) -> str:
-    """Remove acentos, coloca em minúsculas e troca separadores por '_'."""
+def _normalizar(texto) -> str:
     if texto is None:
         return ""
     texto = unicodedata.normalize("NFKD", str(texto))
@@ -108,13 +108,8 @@ def _normalizar(texto: str) -> str:
 
 
 def detectar_colunas(df: pd.DataFrame) -> dict:
-    """
-    Retorna um dicionário {campo_canonico: nome_real_da_coluna}.
-    Caso o campo não exista no arquivo, ele é omitido do dicionário.
-    """
     mapa = {}
     colunas_norm = {col: _normalizar(col) for col in df.columns}
-
     for campo, padroes in FIELD_SYNONYMS.items():
         for col_original, col_norm in colunas_norm.items():
             if col_original in mapa.values():
@@ -129,12 +124,13 @@ def detectar_colunas(df: pd.DataFrame) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# LEITURA E PREPARAÇÃO DOS DADOS
+# LEITURA E PREPARAÇÃO
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner="Processando arquivo carregado...")
 def load_data(file) -> pd.DataFrame:
     nome = file.name.lower()
     if nome.endswith(".csv"):
+        # detecta separador automaticamente (vírgula ou ponto e vírgula)
         try:
             df = pd.read_csv(file, sep=None, engine="python")
         except Exception:
@@ -146,36 +142,49 @@ def load_data(file) -> pd.DataFrame:
 
 
 def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
-    """
-    Renomeia as colunas detectadas para nomes canônicos, converte tipos e
-    limpa a base. As colunas originais que NÃO foram mapeadas são mantidas
-    (úteis para auditoria).
-    """
     df = df_raw.copy()
-
-    # 1) Renomeia colunas detectadas para nomes canônicos
     df = df.rename(columns={v: k for k, v in mapa.items()})
 
-    # 2) Converte Data
+    # --- Datas -------------------------------------------------------------
+    for col_data in ("Data", "Data_Encerrado"):
+        if col_data in df.columns:
+            df[col_data] = pd.to_datetime(
+                df[col_data], errors="coerce", dayfirst=True
+            )
+
     if "Data" in df.columns:
-        df["Data"] = pd.to_datetime(df["Data"], errors="coerce", dayfirst=True)
         invalidas = int(df["Data"].isna().sum())
         if invalidas > 0:
             st.warning(
-                f"⚠️ {invalidas} registro(s) com data/hora inválida foram "
-                "descartados automaticamente da análise."
+                f"⚠️ {invalidas} registro(s) com data inválida foram descartados."
             )
             df = df.dropna(subset=["Data"])
 
-    # 3) Converte numéricos opcionais
+    # --- Tempos ------------------------------------------------------------
     for col in ("Tempo_Espera_Min", "Tempo_Atendimento_Min"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 4) Padroniza textos
-    for col in ("Motivo", "Status", "Analista", "Prioridade", "Canal"):
+    # --- TMA derivado de Data_Encerrado - Data -----------------------------
+    if "Data_Encerrado" in df.columns and "Data" in df.columns:
+        delta = (df["Data_Encerrado"] - df["Data"]).dt.total_seconds() / 60.0
+        # Só considera positivo (ignora negativos ou zero para "Em Atendimento")
+        df["TMA_Calculado_Min"] = delta.where(delta > 0)
+
+    # --- Textos ------------------------------------------------------------
+    for col in ("Motivo", "Status", "Analista", "Urgencia", "Setor"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
+
+    # Motivo: capitaliza para agrupar "desbloqueio por confiança" e "DESBLOQUEIO..."
+    if "Motivo" in df.columns:
+        df["Motivo_Original"] = df["Motivo"]
+        df["Motivo"] = (
+            df["Motivo"]
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+            .str.title()
+        )
 
     if "Resolvido_N1" in df.columns:
         df["Resolvido_N1"] = (
@@ -187,7 +196,7 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# GRÁFICO DE EVOLUÇÃO TEMPORAL (ADAPTATIVO)
+# GRÁFICO DE EVOLUÇÃO TEMPORAL
 # ---------------------------------------------------------------------------
 def build_time_evolution_chart(df_periodo, period_option, data_inicio, data_fim):
     df_local = df_periodo.copy()
@@ -248,7 +257,6 @@ def build_time_evolution_chart(df_periodo, period_option, data_inicio, data_fim)
     if period_option == "Mensal (Últimos 30 dias)":
         return agrega_semana()
 
-    # Personalizado
     if delta_dias <= 1:
         return agrega_hora(data_inicio, data_fim)
     if delta_dias <= 31:
@@ -257,12 +265,43 @@ def build_time_evolution_chart(df_periodo, period_option, data_inicio, data_fim)
 
 
 # ---------------------------------------------------------------------------
+# HEATMAP HORA x DIA DA SEMANA
+# ---------------------------------------------------------------------------
+def build_heatmap_hora_dia(df_periodo):
+    dias_pt = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    df_h = df_periodo.copy()
+    df_h["DiaSemana"] = df_h["Data"].dt.weekday
+    df_h["Hora"] = df_h["Data"].dt.hour
+    pivot = (df_h.groupby(["DiaSemana", "Hora"]).size()
+             .unstack(fill_value=0)
+             .reindex(index=range(7), columns=range(24), fill_value=0))
+    pivot.index = [dias_pt[i] for i in pivot.index]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=[f"{h:02d}h" for h in pivot.columns],
+        y=pivot.index,
+        colorscale="Blues",
+        text=pivot.values,
+        texttemplate="%{text}",
+        hovertemplate="Dia: %{y}<br>Hora: %{x}<br>Chamados: %{z}<extra></extra>",
+    ))
+    fig.update_layout(
+        xaxis_title="Hora",
+        yaxis_title="",
+        margin=dict(l=10, r=10, t=30, b=10),
+        height=320,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # CABEÇALHO
 # ---------------------------------------------------------------------------
 st.title("📡 Dashboard de Suporte N1 - Telecom")
 st.caption(
-    "Painel automático de indicadores, evolução temporal e auditoria para "
-    "squads de atendimento Nível 1."
+    "Painel automático de indicadores, evolução temporal e auditoria "
+    "para squads de atendimento Nível 1."
 )
 
 
@@ -277,78 +316,73 @@ uploaded_file = st.sidebar.file_uploader(
 
 if uploaded_file is None:
     st.info(
-        "👋 **Bem-vindo(a)!** Para começar, carregue o arquivo de atendimentos "
-        "(.csv ou .xlsx) na barra lateral à esquerda."
+        "👋 **Bem-vindo(a)!** Carregue o export de atendimentos N1 "
+        "(.csv ou .xlsx) na barra lateral para começar."
     )
-    st.markdown("#### 🔎 O dashboard reconhece automaticamente colunas como:")
+    st.markdown("#### 🔎 Colunas reconhecidas automaticamente:")
     st.dataframe(
-        pd.DataFrame(
-            {
-                "Campo interno": list(FIELD_SYNONYMS.keys()),
-                "Exemplos de nomes aceitos": [
-                    "Data, Data_Abertura, Criado_Em, Timestamp",
-                    "Chamado, Ticket, ID, Protocolo, Número, OS",
-                    "Motivo, Assunto, Categoria, Tipo, Tópico, Problema",
-                    "Status, Situação, Estado",
-                    "Analista, Atendente, Operador, Agente, Técnico, Responsável",
-                    "Resolvido_N1, FCR, Solucionado, Primeiro_Nivel (opcional)",
-                    "Tempo_Espera_Min, TME, Espera, Wait_Time (opcional)",
-                    "Tempo_Atendimento_Min, TMA, Duração, AHT (opcional)",
-                    "Prioridade, Severidade, Urgência (opcional)",
-                    "Canal, Channel, Origem, Mídia (opcional)",
-                ],
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.caption(
-        "Se um campo opcional não existir, o KPI/gráfico correspondente "
-        "simplesmente não é exibido — o restante continua funcionando."
+        pd.DataFrame({
+            "Campo interno": list(FIELD_SYNONYMS.keys()),
+            "Exemplos de nomes aceitos": [
+                "Data, Data_Abertura, Criado_Em, Abertura",
+                "Data_Encerrado, Data_Fechamento, Closed_At",
+                "ID, Chamado, Ticket, Número, OS, Código",
+                "Protocolo, Numero_Protocolo",
+                "Solicitante, Cliente, Assinante, Conta",
+                "Assunto, Motivo, Categoria, Tipo, Tópico",
+                "Setor, Departamento, Fila, Grupo",
+                "Analista, Atendente, Operador, Agente, Técnico",
+                "Status, Situação, Estado",
+                "Urgência, Prioridade, Severidade",
+                "Interno, Internal, Is_Internal",
+                "Resolvido_N1, FCR, Solucionado (opcional)",
+                "Tempo_Espera_Min, TME (opcional)",
+                "Tempo_Atendimento_Min, TMA, Duração (opcional)",
+            ],
+        }),
+        use_container_width=True, hide_index=True,
     )
     st.stop()
 
 
 # ---------------------------------------------------------------------------
-# LEITURA + DETECÇÃO DE COLUNAS
+# LEITURA + DETECÇÃO
 # ---------------------------------------------------------------------------
 try:
     df_raw = load_data(uploaded_file)
 except Exception as erro:
-    st.error(f"❌ Não foi possível ler o arquivo enviado. Detalhes técnicos: {erro}")
+    st.error(f"❌ Não foi possível ler o arquivo. Detalhes: {erro}")
     st.stop()
 
 if df_raw.empty:
-    st.error("❌ O arquivo carregado está vazio.")
+    st.error("❌ Arquivo vazio.")
     st.stop()
 
 mapa_colunas = detectar_colunas(df_raw)
 
 if CAMPO_MINIMO_OBRIGATORIO not in mapa_colunas:
     st.error(
-        "❌ Não foi possível identificar uma coluna de **Data** no arquivo. "
-        "Verifique se existe alguma coluna com nome semelhante a "
-        "`Data`, `Data_Abertura`, `Criado_Em` ou `Timestamp`."
+        "❌ Não foi possível identificar a coluna de **Data**. "
+        "Verifique se existe algo como `Data`, `Data_Abertura` ou `Criado_Em`."
     )
     st.stop()
 
-with st.sidebar.expander("🧭 Colunas reconhecidas"):
+with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=False):
     for campo, col_real in mapa_colunas.items():
         st.markdown(f"- **{campo}** ← `{col_real}`")
     nao_mapeadas = [c for c in df_raw.columns if c not in mapa_colunas.values()]
     if nao_mapeadas:
-        st.markdown("**Não utilizadas:**")
-        st.markdown(", ".join(f"`{c}`" for c in nao_mapeadas))
+        st.markdown("**Não utilizadas:** " + ", ".join(f"`{c}`" for c in nao_mapeadas))
 
 df = preparar_dados(df_raw, mapa_colunas)
 
 if df.empty:
-    st.error("❌ Após a validação, nenhum registro válido restou para análise.")
+    st.error("❌ Após validação, nenhum registro válido restou.")
     st.stop()
 
 
 # ---------------------------------------------------------------------------
-# SELETOR DE PERÍODO
+# FILTROS LATERAIS ADICIONAIS
 # ---------------------------------------------------------------------------
 st.sidebar.markdown("---")
 period_option = st.sidebar.selectbox(
@@ -373,21 +407,33 @@ elif period_option == "Mensal (Últimos 30 dias)":
     data_inicio = hoje - timedelta(days=29)
     data_fim = hoje + timedelta(days=1) - timedelta(seconds=1)
 else:
-    st.sidebar.markdown("**Selecione o intervalo desejado:**")
+    st.sidebar.markdown("**Selecione o intervalo:**")
     col_a, col_b = st.sidebar.columns(2)
     with col_a:
-        ini_input = st.date_input("Data Início", value=(hoje - timedelta(days=7)).date())
+        ini_input = st.date_input("Data Início",
+                                  value=(hoje - timedelta(days=7)).date())
     with col_b:
         fim_input = st.date_input("Data Fim", value=hoje.date())
     if ini_input > fim_input:
-        st.sidebar.error("⚠️ A data de início não pode ser posterior à data de fim.")
+        st.sidebar.error("⚠️ Data início > data fim.")
         st.stop()
     data_inicio = pd.Timestamp(ini_input)
     data_fim = pd.Timestamp(fim_input) + timedelta(days=1) - timedelta(seconds=1)
 
+# Filtro por Analista (se existir)
+analista_sel = None
+if "Analista" in df.columns:
+    analistas = sorted(df["Analista"].dropna().unique().tolist())
+    analista_sel = st.sidebar.multiselect(
+        "🧑‍💻 Filtrar por Analista",
+        options=analistas,
+        default=[],
+        help="Deixe vazio para incluir todos.",
+    )
+
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    f"🗓️ Exibindo de **{data_inicio.strftime('%d/%m/%Y %H:%M')}** "
+    f"🗓️ De **{data_inicio.strftime('%d/%m/%Y %H:%M')}** "
     f"até **{data_fim.strftime('%d/%m/%Y %H:%M')}**"
 )
 
@@ -397,11 +443,11 @@ st.sidebar.caption(
 # ---------------------------------------------------------------------------
 df_filtrado = df[(df["Data"] >= data_inicio) & (df["Data"] <= data_fim)].copy()
 
+if analista_sel:
+    df_filtrado = df_filtrado[df_filtrado["Analista"].isin(analista_sel)]
+
 if df_filtrado.empty:
-    st.warning(
-        "⚠️ Nenhum chamado encontrado no período selecionado. Ajuste o filtro "
-        "na barra lateral ou verifique se a base contém registros nesta janela."
-    )
+    st.warning("⚠️ Nenhum chamado no período/filtros selecionados.")
     st.stop()
 
 
@@ -410,46 +456,54 @@ if df_filtrado.empty:
 # ---------------------------------------------------------------------------
 st.markdown("### 📊 Indicadores do Período")
 
-total_chamados = len(df_filtrado)
-kpis = []
+total = len(df_filtrado)
+kpis = [("📞 Total de Chamados", f"{total:,}".replace(",", "."))]
 
-kpis.append(("📞 Total de Chamados",
-             f"{total_chamados:,}".replace(",", ".")))
-
-# FCR (só se Resolvido_N1 existir)
+# Taxa de Resolução N1 (via Status ou via Resolvido_N1)
 if "Resolvido_N1" in df_filtrado.columns:
     resolvidos = int((df_filtrado["Resolvido_N1"] == "Sim").sum())
-    taxa_fcr = (resolvidos / total_chamados * 100) if total_chamados else 0.0
-    kpis.append(("✅ Taxa de FCR (N1)", f"{taxa_fcr:.1f}%"))
+    taxa = (resolvidos / total * 100) if total else 0.0
+    kpis.append(("✅ Taxa de Resolução (FCR)", f"{taxa:.1f}%"))
+elif "Status" in df_filtrado.columns:
+    status_lower = df_filtrado["Status"].str.lower()
+    resolvidos = int(status_lower.str.contains("resolvido", na=False).sum())
+    taxa = (resolvidos / total * 100) if total else 0.0
+    kpis.append(("✅ Taxa de Resolução (N1)", f"{taxa:.1f}%"))
+
+    cancelados = int(status_lower.str.contains("cancelad", na=False).sum())
+    taxa_canc = (cancelados / total * 100) if total else 0.0
+    kpis.append(("🚫 Taxa de Cancelamento", f"{taxa_canc:.1f}%"))
+
+# TMA
+if "Tempo_Atendimento_Min" in df_filtrado.columns:
+    tma = df_filtrado["Tempo_Atendimento_Min"].mean()
+    kpis.append(("🎧 TMA Médio", f"{tma:.1f} min" if pd.notna(tma) else "N/A"))
+elif "TMA_Calculado_Min" in df_filtrado.columns:
+    tma = df_filtrado["TMA_Calculado_Min"].mean()
+    if pd.notna(tma):
+        kpis.append(("🎧 TMA Médio (Data Encerr. - Data)", f"{tma:.1f} min"))
 
 # TME
 if "Tempo_Espera_Min" in df_filtrado.columns:
     tme = df_filtrado["Tempo_Espera_Min"].mean()
     kpis.append(("⏱️ TME Médio", f"{tme:.1f} min" if pd.notna(tme) else "N/A"))
 
-# TMA
-if "Tempo_Atendimento_Min" in df_filtrado.columns:
-    tma = df_filtrado["Tempo_Atendimento_Min"].mean()
-    kpis.append(("🎧 TMA Médio", f"{tma:.1f} min" if pd.notna(tma) else "N/A"))
-
-# Analistas ativos (só se Analista existir)
+# Analistas ativos
 if "Analista" in df_filtrado.columns:
-    n_analistas = df_filtrado["Analista"].nunique()
-    kpis.append(("👥 Analistas Ativos", f"{n_analistas}"))
+    n = df_filtrado["Analista"].nunique()
+    kpis.append(("👥 Analistas Ativos", f"{n}"))
 
-# Status "Aberto"/"Pendente" (heurística simples)
+# Chamados em aberto (heurística por Status)
 if "Status" in df_filtrado.columns:
-    status_series = df_filtrado["Status"].str.lower()
-    em_aberto = status_series.str.contains(
-        r"aberto|pendente|em andamento|aguardando|andamento",
-        regex=True, na=False
+    em_aberto = df_filtrado["Status"].str.lower().str.contains(
+        r"novo|aberto|em atendimento|aguardando|pendente", regex=True, na=False
     ).sum()
-    kpis.append(("📬 Chamados em Aberto", f"{int(em_aberto)}"))
+    kpis.append(("📬 Em Aberto / Andamento", f"{int(em_aberto)}"))
 
-# Renderiza KPIs em grade responsiva
-COLS_POR_LINHA = 4
-for i in range(0, len(kpis), COLS_POR_LINHA):
-    linha = kpis[i:i + COLS_POR_LINHA]
+# Renderiza em grade
+COLS = 4
+for i in range(0, len(kpis), COLS):
+    linha = kpis[i:i + COLS]
     cols = st.columns(len(linha))
     for col, (titulo, valor) in zip(cols, linha):
         col.metric(titulo, valor)
@@ -458,94 +512,119 @@ st.markdown("---")
 
 
 # ---------------------------------------------------------------------------
-# GRÁFICOS ADAPTATIVOS
+# GRÁFICOS
 # ---------------------------------------------------------------------------
-grafico_motivo_disponivel = "Motivo" in df_filtrado.columns
-grafico_status_disponivel = "Status" in df_filtrado.columns
-grafico_analista_disponivel = "Analista" in df_filtrado.columns
+col_g1, col_g2 = st.columns(2)
 
-col_graf1, col_graf2 = st.columns(2)
-
-with col_graf1:
-    if grafico_motivo_disponivel:
-        st.markdown("#### 🔎 Principais Motivos de Contato")
-        motivo_counts = df_filtrado["Motivo"].value_counts().head(15).reset_index()
-        motivo_counts.columns = ["Motivo", "Quantidade"]
-        fig_motivos = px.bar(
-            motivo_counts, x="Quantidade", y="Motivo", orientation="h",
-            text="Quantidade", color="Quantidade",
-            color_continuous_scale="Blues",
-        )
-        fig_motivos.update_layout(
+with col_g1:
+    if "Motivo" in df_filtrado.columns:
+        st.markdown("#### 🔎 Top Assuntos / Motivos")
+        mc = df_filtrado["Motivo"].value_counts().head(15).reset_index()
+        mc.columns = ["Motivo", "Quantidade"]
+        fig = px.bar(mc, x="Quantidade", y="Motivo", orientation="h",
+                     text="Quantidade", color="Quantidade",
+                     color_continuous_scale="Blues")
+        fig.update_layout(
             yaxis={"categoryorder": "total ascending"},
             showlegend=False, coloraxis_showscale=False,
             xaxis_title="Nº de Chamados", yaxis_title="",
             margin=dict(l=10, r=10, t=30, b=10),
         )
-        fig_motivos.update_traces(textposition="outside")
-        st.plotly_chart(fig_motivos, use_container_width=True)
-    elif grafico_status_disponivel:
-        st.markdown("#### 📌 Distribuição por Status")
-        st_counts = df_filtrado["Status"].value_counts().reset_index()
-        st_counts.columns = ["Status", "Quantidade"]
-        fig_st = px.pie(st_counts, names="Status", values="Quantidade", hole=0.5)
-        fig_st.update_layout(margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig_st, use_container_width=True)
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("ℹ️ Nenhuma coluna de Motivo/Assunto/Categoria foi reconhecida.")
+        st.info("ℹ️ Sem coluna de Motivo/Assunto.")
 
-with col_graf2:
-    rotulo_periodo = period_option.split(" ")[0]
-    st.markdown(f"#### 📈 Evolução de Volume — Visão {rotulo_periodo}")
-    fig_evolucao = build_time_evolution_chart(
-        df_filtrado, period_option, data_inicio, data_fim
+with col_g2:
+    rotulo = period_option.split(" ")[0]
+    st.markdown(f"#### 📈 Evolução de Volume — Visão {rotulo}")
+    st.plotly_chart(
+        build_time_evolution_chart(df_filtrado, period_option, data_inicio, data_fim),
+        use_container_width=True,
     )
-    st.plotly_chart(fig_evolucao, use_container_width=True)
 
 
-# Linha extra de gráficos: Status + Analista (se disponíveis)
-col_graf3, col_graf4 = st.columns(2)
+col_g3, col_g4 = st.columns(2)
 
-with col_graf3:
-    if grafico_status_disponivel and grafico_motivo_disponivel:
+with col_g3:
+    if "Status" in df_filtrado.columns:
         st.markdown("#### 📌 Distribuição por Status")
-        st_counts = df_filtrado["Status"].value_counts().reset_index()
-        st_counts.columns = ["Status", "Quantidade"]
-        fig_st = px.pie(st_counts, names="Status", values="Quantidade", hole=0.5)
-        fig_st.update_layout(margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig_st, use_container_width=True)
+        sc = df_filtrado["Status"].value_counts().reset_index()
+        sc.columns = ["Status", "Quantidade"]
+        fig = px.pie(sc, names="Status", values="Quantidade", hole=0.5)
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, use_container_width=True)
 
-with col_graf4:
-    if grafico_analista_disponivel:
+with col_g4:
+    if "Analista" in df_filtrado.columns:
         st.markdown("#### 🧑‍💻 Top Analistas por Volume")
-        an_counts = df_filtrado["Analista"].value_counts().head(15).reset_index()
-        an_counts.columns = ["Analista", "Quantidade"]
-        fig_an = px.bar(
-            an_counts, x="Quantidade", y="Analista", orientation="h",
-            text="Quantidade", color="Quantidade",
-            color_continuous_scale="Greens",
-        )
-        fig_an.update_layout(
+        ac = df_filtrado["Analista"].value_counts().head(15).reset_index()
+        ac.columns = ["Analista", "Quantidade"]
+        fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
+                     text="Quantidade", color="Quantidade",
+                     color_continuous_scale="Greens")
+        fig.update_layout(
             yaxis={"categoryorder": "total ascending"},
             showlegend=False, coloraxis_showscale=False,
             xaxis_title="Nº de Chamados", yaxis_title="",
             margin=dict(l=10, r=10, t=30, b=10),
         )
-        fig_an.update_traces(textposition="outside")
-        st.plotly_chart(fig_an, use_container_width=True)
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# --- Heatmap Hora x Dia da Semana -----------------------------------------
+st.markdown("#### 🔥 Heatmap de Volume — Hora × Dia da Semana")
+st.caption(
+    "Útil para dimensionar escala e identificar picos de demanda por "
+    "faixa horária e dia da semana."
+)
+st.plotly_chart(build_heatmap_hora_dia(df_filtrado), use_container_width=True)
+
+
+# --- Ranking detalhado de Analistas (tabela) -------------------------------
+if "Analista" in df_filtrado.columns and "Status" in df_filtrado.columns:
+    st.markdown("#### 🏆 Ranking Detalhado de Analistas")
+    df_rank = df_filtrado.copy()
+    df_rank["Resolvido"] = df_rank["Status"].str.lower().str.contains(
+        "resolvido", na=False
+    )
+    df_rank["Cancelado"] = df_rank["Status"].str.lower().str.contains(
+        "cancelad", na=False
+    )
+
+    aggs = {
+        "Total": ("Status", "size"),
+        "Resolvidos": ("Resolvido", "sum"),
+        "Cancelados": ("Cancelado", "sum"),
+    }
+    if "TMA_Calculado_Min" in df_rank.columns:
+        aggs["TMA Médio (min)"] = ("TMA_Calculado_Min", "mean")
+
+    ranking = df_rank.groupby("Analista").agg(**aggs).reset_index()
+    ranking["Taxa Resolução (%)"] = (
+        ranking["Resolvidos"] / ranking["Total"] * 100
+    ).round(1)
+    ranking["Taxa Cancelamento (%)"] = (
+        ranking["Cancelados"] / ranking["Total"] * 100
+    ).round(1)
+    if "TMA Médio (min)" in ranking.columns:
+        ranking["TMA Médio (min)"] = ranking["TMA Médio (min)"].round(1)
+
+    ranking = ranking.sort_values("Total", ascending=False)
+    st.dataframe(ranking, use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
 
 # ---------------------------------------------------------------------------
-# TABELA DE AUDITORIA
+# AUDITORIA
 # ---------------------------------------------------------------------------
 st.markdown("### 🗂️ Auditoria de Chamados (Dados Brutos)")
 st.caption(
-    "Utilize a tabela abaixo para conferência detalhada dos registros do "
-    "período filtrado. Os dados podem ser exportados em CSV."
+    "Tabela detalhada dos registros filtrados. Use o botão abaixo para "
+    "exportar em CSV (compatível com Excel)."
 )
-
 df_exibicao = df_filtrado.sort_values("Data", ascending=False).reset_index(drop=True)
 st.dataframe(df_exibicao, use_container_width=True, height=420)
 
