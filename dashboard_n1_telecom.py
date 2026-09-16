@@ -8,15 +8,6 @@ Como executar:
     pip install streamlit pandas plotly openpyxl
     streamlit run dashboard_n1_telecom.py
 
-Colunas obrigatórias no arquivo carregado (.csv ou .xlsx):
-    - Data                    (timestamp com data e hora do chamado)
-    - Chamado                 (ID único do ticket)
-    - Motivo                  (Sem Sinal, Lentidão, Financeiro, Configuração de Modem, ...)
-    - Status                  (Aberto, Resolvido, Escalado)
-    - Tempo_Espera_Min        (número - minutos de espera / TME)
-    - Tempo_Atendimento_Min   (número - minutos de atendimento / TMA)
-    - Resolvido_N1            ('Sim' ou 'Não' - usado para calcular o FCR)
-"""
 
 import streamlit as st
 import pandas as pd
