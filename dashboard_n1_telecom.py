@@ -79,7 +79,6 @@ def build_time_evolution_chart(df_periodo, period_option, data_inicio, data_fim)
       - Semanal      -> agregação DIA A DIA
       - Mensal       -> agregação POR SEMANA
       - Personalizado-> escolhe a granularidade de acordo com o tamanho do intervalo
-    """
     df_local = df_periodo.copy()
     delta_dias = (data_fim.normalize() - data_inicio.normalize()).days
 
