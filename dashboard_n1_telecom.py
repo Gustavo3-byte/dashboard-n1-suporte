@@ -827,4 +827,212 @@ if df_raw.empty:
 mapa_colunas = detectar_colunas(df_raw)
 mapa_colunas = _fallback_data(df_raw, mapa_colunas)
 
-if CAMPO_MINIMO_OBRIGATORIO not in
+if CAMPO_MINIMO_OBRIGATORIO not in mapa_colunas:
+    st.error(
+        "❌ Não foi possível identificar a coluna de **Data**. "
+        "Colunas encontradas no arquivo: "
+        + ", ".join(f"`{c}`" for c in df_raw.columns)
+    )
+    st.stop()
+
+relatorio = validar_qualidade(df_raw, mapa_colunas)
+exibir_relatorio_qualidade(relatorio)
+
+with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=True):
+    for campo, col_real in mapa_colunas.items():
+        st.markdown(f"- **{campo}** ← `{col_real}`")
+    nao_mapeadas = [c for c in df_raw.columns if c not in mapa_colunas.values()]
+    if nao_mapeadas:
+        st.markdown("**Não utilizadas:** " +
+                    ", ".join(f"`{c}`" for c in nao_mapeadas))
+
+df = preparar_dados(df_raw, mapa_colunas)
+
+if df.empty:
+    st.error("❌ Após validação, nenhum registro válido restou.")
+    st.stop()
+
+dt_min = df["Data"].min()
+dt_max = df["Data"].max()
+
+st.caption(
+    f"🗓️ Base carregada: **{len(df):,}** chamados, de "
+    f"**{dt_min.strftime('%d/%m/%Y %H:%M')}** "
+    f"até **{dt_max.strftime('%d/%m/%Y %H:%M')}**."
+    .replace(",", ".")
+)
+
+
+# ===========================================================================
+# KPIs
+# ===========================================================================
+st.markdown("### 📊 Indicadores da Base")
+
+total = len(df)
+kpis = [("📞 Total de Chamados", f"{total:,}".replace(",", "."))]
+
+if "Resolvido_N1" in df.columns:
+    resolvidos = int((df["Resolvido_N1"] == "Sim").sum())
+    taxa = (resolvidos / total * 100) if total else 0.0
+    kpis.append(("✅ Taxa de Resolução (FCR)", f"{taxa:.1f}%"))
+elif "Status" in df.columns:
+    status_lower = df["Status"].str.lower()
+    resolvidos = int(status_lower.str.contains("resolvido", na=False).sum())
+    taxa = (resolvidos / total * 100) if total else 0.0
+    kpis.append(("✅ Taxa de Resolução (N1)", f"{taxa:.1f}%"))
+
+    cancelados = int(status_lower.str.contains("cancelado", na=False).sum())
+    taxa_canc = (cancelados / total * 100) if total else 0.0
+    kpis.append(("🚫 Taxa de Cancelamento", f"{taxa_canc:.1f}%"))
+
+if "Tempo_Atendimento_Min" in df.columns:
+    tma = df["Tempo_Atendimento_Min"].mean()
+    kpis.append(("🎧 TMA Médio", f"{tma:.1f} min" if pd.notna(tma) else "N/A"))
+elif "TMA_Calculado_Min" in df.columns:
+    tma = df["TMA_Calculado_Min"].mean()
+    if pd.notna(tma):
+        kpis.append(("🎧 TMA Médio (Encerr. − Abertura)", f"{tma:.1f} min"))
+
+if "Tempo_Espera_Min" in df.columns:
+    tme = df["Tempo_Espera_Min"].mean()
+    kpis.append(("⏱️ TME Médio", f"{tme:.1f} min" if pd.notna(tme) else "N/A"))
+
+if "Analista" in df.columns:
+    n = df["Analista"].nunique()
+    kpis.append(("👥 Analistas Ativos", f"{n}"))
+
+if "Status" in df.columns:
+    em_aberto = df["Status"].str.lower().str.contains(
+        r"em aberto|novo|aberto|aguardando|pendente",
+        regex=True, na=False
+    ).sum()
+    kpis.append(("📬 Em Aberto / Andamento", f"{int(em_aberto)}"))
+
+COLS = 4
+for i in range(0, len(kpis), COLS):
+    linha = kpis[i:i + COLS]
+    cols = st.columns(len(linha))
+    for col, (titulo, valor) in zip(cols, linha):
+        col.metric(titulo, valor)
+
+st.markdown("---")
+
+
+# ===========================================================================
+# GRÁFICOS
+# ===========================================================================
+col_g1, col_g2 = st.columns(2)
+
+with col_g1:
+    if "Motivo" in df.columns:
+        st.markdown("#### 🔎 Top Assuntos / Motivos")
+        mc = df["Motivo"].value_counts().head(15).reset_index()
+        mc.columns = ["Motivo", "Quantidade"]
+        fig = px.bar(mc, x="Quantidade", y="Motivo", orientation="h",
+                     text="Quantidade", color="Quantidade",
+                     color_continuous_scale="Blues")
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            xaxis_title="Nº de Chamados", yaxis_title="",
+            margin=dict(l=10, r=10, t=30, b=10),
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("ℹ️ Sem coluna de Motivo/Assunto.")
+
+with col_g2:
+    st.markdown("#### 📈 Evolução de Volume na Base")
+    st.plotly_chart(build_time_evolution_chart(df), use_container_width=True)
+
+
+col_g3, col_g4 = st.columns(2)
+
+with col_g3:
+    if "Status" in df.columns:
+        st.markdown("#### 📌 Distribuição por Status")
+        sc = df["Status"].value_counts().reset_index()
+        sc.columns = ["Status", "Quantidade"]
+        fig = px.pie(sc, names="Status", values="Quantidade", hole=0.5)
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+with col_g4:
+    if "Analista" in df.columns:
+        st.markdown("#### 🧑‍💻 Top Analistas por Volume")
+        ac = df["Analista"].value_counts().head(15).reset_index()
+        ac.columns = ["Analista", "Quantidade"]
+        fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
+                     text="Quantidade", color="Quantidade",
+                     color_continuous_scale="Greens")
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            xaxis_title="Nº de Chamados", yaxis_title="",
+            margin=dict(l=10, r=10, t=30, b=10),
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+st.markdown("#### 🔥 Heatmap de Volume — Hora × Dia da Semana")
+st.caption(
+    "Útil para dimensionar escala e identificar picos de demanda por "
+    "faixa horária e dia da semana."
+)
+st.plotly_chart(build_heatmap_hora_dia(df), use_container_width=True)
+
+
+if "Analista" in df.columns and "Status" in df.columns:
+    st.markdown("#### 🏆 Ranking Detalhado de Analistas")
+    df_rank = df.copy()
+    df_rank["Resolvido"] = df_rank["Status"].str.lower().str.contains(
+        "resolvido", na=False
+    )
+    df_rank["Cancelado"] = df_rank["Status"].str.lower().str.contains(
+        "cancelado", na=False
+    )
+
+    aggs = {
+        "Total": ("Status", "size"),
+        "Resolvidos": ("Resolvido", "sum"),
+        "Cancelados": ("Cancelado", "sum"),
+    }
+    if "TMA_Calculado_Min" in df_rank.columns:
+        aggs["TMA Médio (min)"] = ("TMA_Calculado_Min", "mean")
+
+    ranking = df_rank.groupby("Analista").agg(**aggs).reset_index()
+    ranking["Taxa Resolução (%)"] = (
+        ranking["Resolvidos"] / ranking["Total"] * 100
+    ).round(1)
+    ranking["Taxa Cancelamento (%)"] = (
+        ranking["Cancelados"] / ranking["Total"] * 100
+    ).round(1)
+    if "TMA Médio (min)" in ranking.columns:
+        ranking["TMA Médio (min)"] = ranking["TMA Médio (min)"].round(1)
+
+    ranking = ranking.sort_values("Total", ascending=False)
+    st.dataframe(ranking, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+
+# ===========================================================================
+# AUDITORIA
+# ===========================================================================
+st.markdown("### 🗂️ Auditoria de Chamados (Dados Brutos)")
+st.caption(
+    "Tabela detalhada dos registros. Use o botão abaixo para "
+    "exportar em CSV (compatível com Excel)."
+)
+df_exibicao = df.sort_values("Data", ascending=False).reset_index(drop=True)
+st.dataframe(df_exibicao, use_container_width=True, height=420)
+
+csv_export = df_exibicao.to_csv(index=False, sep=";").encode("utf-8-sig")
+st.download_button(
+    label="⬇️ Exportar CSV",
+    data=csv_export,
+    file_name=f"auditoria_n1_{dt_min.date()}_a_{dt_max.date()}.csv",
+    mime="text/csv",
+)
