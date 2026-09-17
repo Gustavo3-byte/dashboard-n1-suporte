@@ -9,20 +9,8 @@ Formatos suportados:
   - .xlsx, .xlsm, .xls, .xlsb, .ods
   - .json, .parquet, .feather
 
-Recursos de robustez:
-  - Detecção de encoding (utf-8, utf-8-sig, latin-1, cp1252, utf-16)
-  - Detecção de separador (; , \\t | :) com csv.Sniffer + fallback
-  - Detecção automática da linha de cabeçalho (arquivos com banner/título)
-  - Escolha automática da aba do Excel com mais dados
-  - Detecção de magic number (txt que na verdade é xlsx/xls)
-  - Deduplicação por ID/Protocolo (mantém o mais recente)
-  - Normalização de Motivo e Status
-  - Features derivadas (Ano, Mês, Dia, DiaSemana, Hora, FaixaHoraria)
-  - TMA real de (Data_Encerrado − Data) quando disponível
-
 Como executar:
     pip install streamlit pandas plotly openpyxl chardet
-    # opcionais: pyxlsb (xlsb), odfpy (ods), pyarrow (parquet/feather)
     streamlit run dashboard_n1_telecom.py
 """
 
@@ -39,7 +27,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# --- opcionais -------------------------------------------------------------
 try:
     import chardet
     _TEM_CHARDET = True
@@ -69,7 +56,6 @@ EXT_EXCEL = {".xlsx", ".xlsm", ".xls", ".xlsb", ".ods"}
 
 
 def _achar_bytes(source) -> bytes:
-    """Devolve bytes de um arquivo em disco, BytesIO ou UploadedFile."""
     if hasattr(source, "read"):
         raw = source.read()
         if isinstance(raw, str):
@@ -118,10 +104,6 @@ def _detectar_separador(amostra: str) -> str:
 
 
 def _detectar_linha_cabecalho(df_bruto: pd.DataFrame) -> int:
-    """
-    Encontra a linha que parece ser o cabeçalho real de uma tabela.
-    Útil quando o arquivo tem título/banner antes dos dados.
-    """
     melhor_idx = 0
     melhor_score = -1
 
@@ -162,7 +144,6 @@ def _ler_csv(raw: bytes) -> pd.DataFrame:
 
     sep = _detectar_separador(amostra)
 
-    # 1) Lê sem cabeçalho só para achar a linha do cabeçalho real
     df_bruto = pd.read_csv(
         io.BytesIO(raw),
         sep=sep,
@@ -211,7 +192,6 @@ def _ler_excel(source) -> pd.DataFrame:
     else:
         xls = pd.ExcelFile(source, engine=engine)
 
-    # Escolhe a aba com mais dados (linhas x colunas)
     melhor_aba, melhor_score = None, -1
     for aba in xls.sheet_names:
         try:
@@ -259,16 +239,14 @@ def _ler_json(raw: bytes) -> pd.DataFrame:
 
 
 def ler_planilha(source) -> pd.DataFrame:
-    """Ponto de entrada: aceita caminho, BytesIO ou UploadedFile."""
     nome = _achar_nome(source).lower()
     ext = os.path.splitext(nome)[1]
 
-    # CSV / TXT / TSV (com checagem de magic number)
     if ext in EXT_CSV or ext == "":
         raw = _achar_bytes(source)
-        if raw[:4] == b"PK\x03\x04":            # xlsx renomeado
+        if raw[:4] == b"PK\x03\x04":
             return _ler_excel(io.BytesIO(raw))
-        if raw[:4] == b"\xd0\xcf\x11\xe0":      # xls renomeado
+        if raw[:4] == b"\xd0\xcf\x11\xe0":
             return _ler_excel(io.BytesIO(raw))
         return _ler_csv(raw)
 
@@ -283,7 +261,6 @@ def ler_planilha(source) -> pd.DataFrame:
     if ext == ".feather":
         return pd.read_feather(source)
 
-    # Fallback
     try:
         return _ler_csv(_achar_bytes(source))
     except Exception:
@@ -291,7 +268,6 @@ def ler_planilha(source) -> pd.DataFrame:
 
 
 def diagnosticar(source) -> dict:
-    """Devolve metadados do arquivo (útil para exibir no sidebar)."""
     nome = _achar_nome(source)
     ext = os.path.splitext(nome)[1]
     info = {"arquivo": nome, "extensao": ext}
@@ -310,7 +286,7 @@ def diagnosticar(source) -> dict:
 
 
 # ===========================================================================
-# MAPEAMENTO DE CAMPOS CANÔNICOS -> SINÔNIMOS
+# MAPEAMENTO DE COLUNAS
 # ===========================================================================
 FIELD_SYNONYMS = {
     "Data": [
@@ -555,7 +531,6 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
     df = df_raw.copy()
     df = df.rename(columns={v: k for k, v in mapa.items()})
 
-    # --- Datas -------------------------------------------------------------
     for col_data in ("Data", "Data_Encerrado"):
         if col_data in df.columns:
             df[col_data] = pd.to_datetime(
@@ -571,7 +546,6 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
             )
             df = df.dropna(subset=["Data"])
 
-    # --- Deduplicação ------------------------------------------------------
     chave_dedup = None
     if "Chamado" in df.columns:
         chave_dedup = "Chamado"
@@ -590,17 +564,14 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
                 "removidos (mantido o mais recente)."
             )
 
-    # --- Tempos ------------------------------------------------------------
     for col in ("Tempo_Espera_Min", "Tempo_Atendimento_Min"):
         if col in df.columns:
             df[col] = _converter_tempo_flexivel(df[col])
 
-    # --- TMA derivado ------------------------------------------------------
     if "Data_Encerrado" in df.columns and "Data" in df.columns:
         delta = (df["Data_Encerrado"] - df["Data"]).dt.total_seconds() / 60.0
         df["TMA_Calculado_Min"] = delta.where(delta > 0)
 
-    # --- Motivo / Status ---------------------------------------------------
     if "Motivo" in df.columns:
         df["Motivo_Original"] = df["Motivo"]
         df["Motivo"] = _normalizar_motivo(df["Motivo"])
@@ -609,7 +580,6 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
         df["Status_Original"] = df["Status"]
         df["Status"] = _padronizar_status(df["Status"])
 
-    # --- Textos ------------------------------------------------------------
     for col in ("Analista", "Urgencia", "Setor", "Solicitante"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
@@ -619,7 +589,6 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
             df["Resolvido_N1"].astype(str).str.strip().str.capitalize()
         )
 
-    # --- Features derivadas ------------------------------------------------
     if "Data" in df.columns:
         df["Ano"] = df["Data"].dt.year
         df["Mes"] = df["Data"].dt.month
@@ -636,7 +605,6 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
                   "Tarde (12-17)", "Noite (18-23)"]
         df["FaixaHoraria"] = pd.cut(df["Hora"], bins=bins, labels=labels)
 
-    # --- Limpeza final -----------------------------------------------------
     antes = len(df)
     if "Chamado" in df.columns:
         df = df[df["Chamado"].notna() &
@@ -653,7 +621,7 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
 
 
 # ===========================================================================
-# GRÁFICO DE EVOLUÇÃO TEMPORAL
+# GRÁFICO DE EVOLUÇÃO
 # ===========================================================================
 def build_time_evolution_chart(df_base):
     df_local = df_base.copy()
@@ -674,7 +642,6 @@ def build_time_evolution_chart(df_base):
         return fig
 
     if delta_dias <= 1:
-        # "h" minúsculo: compatível com pandas 2.2+
         df_local["Agrupador"] = df_local["Data"].dt.floor("h")
         faixa = pd.date_range(start=dt_min.floor("h"),
                               end=dt_max.floor("h"), freq="h")
@@ -712,9 +679,6 @@ def build_time_evolution_chart(df_base):
     return fig
 
 
-# ===========================================================================
-# HEATMAP HORA x DIA DA SEMANA
-# ===========================================================================
 def build_heatmap_hora_dia(df_base):
     dias_pt = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
     df_h = df_base.copy()
@@ -800,4 +764,62 @@ if usar_upload and uploaded_file is None:
     )
     st.stop()
 
-if not usar_upload and not
+if not usar_upload and not arquivo_auto_disponivel:
+    st.stop()
+
+
+# ===========================================================================
+# LEITURA + DETECÇÃO + VALIDAÇÃO
+# ===========================================================================
+try:
+    df_raw = load_data(uploaded_file, ARQUIVO_AUTO, mtime_auto, tamanho_auto)
+except Exception as erro:
+    st.error(f"❌ Não foi possível carregar os dados. Detalhes: {erro}")
+    st.stop()
+
+if df_raw.empty:
+    st.error("❌ Arquivo vazio.")
+    st.stop()
+
+mapa_colunas = detectar_colunas(df_raw)
+
+if CAMPO_MINIMO_OBRIGATORIO not in mapa_colunas:
+    st.error(
+        "❌ Não foi possível identificar a coluna de **Data**. "
+        "Verifique se existe algo como `Data`, `Data_Abertura` ou `Criado_Em`."
+    )
+    st.stop()
+
+relatorio = validar_qualidade(df_raw, mapa_colunas)
+exibir_relatorio_qualidade(relatorio)
+
+with st.sidebar.expander("🔬 Diagnóstico do arquivo", expanded=False):
+    try:
+        info = diagnosticar(
+            uploaded_file if uploaded_file is not None else ARQUIVO_AUTO
+        )
+        for k, v in info.items():
+            st.markdown(f"- **{k}**: `{v}`")
+    except Exception as e:
+        st.caption(f"Sem diagnóstico: {e}")
+
+with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=False):
+    for campo, col_real in mapa_colunas.items():
+        st.markdown(f"- **{campo}** ← `{col_real}`")
+    nao_mapeadas = [c for c in df_raw.columns if c not in mapa_colunas.values()]
+    if nao_mapeadas:
+        st.markdown("**Não utilizadas:** " +
+                    ", ".join(f"`{c}`" for c in nao_mapeadas))
+
+df = preparar_dados(df_raw, mapa_colunas)
+
+if df.empty:
+    st.error("❌ Após validação, nenhum registro válido restou.")
+    st.stop()
+
+dt_min = df["Data"].min()
+dt_max = df["Data"].max()
+
+st.caption(
+    f"🗓️ Base carregada: **{len(df):,}** chamados, de "
+    f"**
