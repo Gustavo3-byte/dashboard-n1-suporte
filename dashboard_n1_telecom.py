@@ -1,24 +1,9 @@
 """
-Dashboard de Suporte N1 - Telecom (v5 - Final)
-==============================================
-Versão única, com leitura robusta, deduplicação, normalização de motivo,
-padronização de status, features derivadas, KPIs adaptativos e todos os
-gráficos (Top Assuntos, Evolução, Status, Top Analistas, Heatmap,
-Ranking, Auditoria).
-
-Recursos:
-  - Detecção automática de colunas por sinônimos (id/protocolo, Assunto,
-    Data, Status, Analista, Urgência, Data Encerrado, etc.).
-  - Leitura robusta: detecta encoding (utf-8, latin-1, cp1252, BOM) e
-    separador (;, ,, tab, |).
-  - Deduplicação por ID/Protocolo (mantém o mais recente).
-  - Normalização de Motivo (agrupa "Desbloqueio por Confiança" etc.).
-  - Padronização de Status (Resolvido / Cancelado / Em Aberto / Escalado).
-  - Features derivadas: Ano, Mês, Dia, DiaSemana, Hora, FimDeSemana,
-    FaixaHoraria.
-  - TMA real calculado de "Data Encerrado" − "Data".
-  - Fallback para upload manual quando o arquivo automático não existe.
-  - Compatibilidade retroativa com exports que tragam TME / TMA / FCR.
+Dashboard de Suporte N1 - Telecom (v5.1 - Final)
+================================================
+Correção aplicada: substitui o alias "H" (hora) por "h" — obrigatório
+no pandas 2.2+ / 3.x. Também endurece a escolha de granularidade para
+funcionar com qualquer versão do pandas.
 
 Como executar:
     pip install streamlit pandas plotly openpyxl chardet
@@ -330,7 +315,7 @@ def _padronizar_status(serie: pd.Series) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# CONVERSÃO FLEXÍVEL DE TEMPO (HH:MM:SS, 12m30s, número)
+# CONVERSÃO FLEXÍVEL DE TEMPO
 # ---------------------------------------------------------------------------
 def _converter_tempo_flexivel(serie: pd.Series) -> pd.Series:
     num = pd.to_numeric(serie, errors="coerce")
@@ -462,9 +447,16 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# GRÁFICO DE EVOLUÇÃO TEMPORAL (granularidade automática)
+# GRÁFICO DE EVOLUÇÃO TEMPORAL
 # ---------------------------------------------------------------------------
 def build_time_evolution_chart(df_base):
+    """
+    Escolhe granularidade automaticamente:
+      - até 1 dia    -> hora a hora
+      - até 31 dias  -> dia a dia
+      - mais de 31   -> semana a semana
+    Usa aliases compatíveis com pandas 2.2+ ("h", "D", "W").
+    """
     df_local = df_base.copy()
     dt_min = df_local["Data"].min()
     dt_max = df_local["Data"].max()
@@ -483,9 +475,10 @@ def build_time_evolution_chart(df_base):
         return fig
 
     if delta_dias <= 1:
-        df_local["Agrupador"] = df_local["Data"].dt.floor("H")
-        faixa = pd.date_range(start=dt_min.floor("H"),
-                              end=dt_max.floor("H"), freq="H")
+        # >>> CORREÇÃO: "h" em vez de "H" (pandas 2.2+)
+        df_local["Agrupador"] = df_local["Data"].dt.floor("h")
+        faixa = pd.date_range(start=dt_min.floor("h"),
+                              end=dt_max.floor("h"), freq="h")
         contagem = (df_local.groupby("Agrupador").size()
                     .reindex(faixa, fill_value=0).reset_index())
         contagem.columns = ["Periodo", "Chamados"]
@@ -560,7 +553,7 @@ st.caption(
 
 
 # ---------------------------------------------------------------------------
-# FONTE DE DADOS: arquivo automático (preferencial) ou upload manual
+# FONTE DE DADOS
 # ---------------------------------------------------------------------------
 st.sidebar.header("⚙️ Fonte de Dados")
 
@@ -631,11 +624,9 @@ if CAMPO_MINIMO_OBRIGATORIO not in mapa_colunas:
     )
     st.stop()
 
-# Relatório de qualidade (sidebar)
 relatorio = validar_qualidade(df_raw, mapa_colunas)
 exibir_relatorio_qualidade(relatorio)
 
-# Colunas reconhecidas (sidebar)
 with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=False):
     for campo, col_real in mapa_colunas.items():
         st.markdown(f"- **{campo}** ← `{col_real}`")
@@ -644,14 +635,12 @@ with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=False):
         st.markdown("**Não utilizadas:** " +
                     ", ".join(f"`{c}`" for c in nao_mapeadas))
 
-# Preparação final
 df = preparar_dados(df_raw, mapa_colunas)
 
 if df.empty:
     st.error("❌ Após validação, nenhum registro válido restou.")
     st.stop()
 
-# Intervalo da base (informativo)
 dt_min = df["Data"].min()
 dt_max = df["Data"].max()
 
@@ -664,7 +653,7 @@ st.caption(
 
 
 # ---------------------------------------------------------------------------
-# KPIs ADAPTATIVOS
+# KPIs
 # ---------------------------------------------------------------------------
 st.markdown("### 📊 Indicadores da Base")
 
@@ -766,4 +755,14 @@ with col_g4:
         fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
                      text="Quantidade", color="Quantidade",
                      color_continuous_scale="Greens")
-        fig.update
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            xaxis_title="Nº de Chamados", yaxis_title="",
+            margin=dict(l=10, r=10, t=30, b=10),
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# --- Heatmap Hora x Dia da Semana ---------------------------------
