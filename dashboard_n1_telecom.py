@@ -1,13 +1,12 @@
 """
-Dashboard de Suporte N1 - Telecom (v6.1)
+Dashboard de Suporte N1 - Telecom (v6.2)
 =========================================
-Correções aplicadas:
-  - _normalizar agora remove BOM, aspas, NBSP e colapsa separadores.
-  - Regex da coluna Data foi afrouxada (aceita data_hora, dt_abertura,
-    data de abertura, criado_em, etc.).
-  - Fallback automático: se Data não for detectada, procura por
-    qualquer coluna que contenha "data", "dt", "abert" ou "criad".
-  - Correção do floor("h") para pandas 2.2+.
+Novidades desta versão:
+  - Mostra SEMPRE qual arquivo está sendo lido (nome + origem).
+  - Detecta "modo agregado": se o arquivo tiver apenas colunas do tipo
+    Tag/Quantidade/%, exibe um painel de barras/pizza direto, sem
+    exigir coluna Data.
+  - Mensagem de erro cirúrgica quando falta Data, com lista de colunas.
 
 Como executar:
     pip install streamlit pandas plotly openpyxl chardet
@@ -111,7 +110,7 @@ def _detectar_linha_cabecalho(df_bruto: pd.DataFrame) -> int:
         linha = df_bruto.iloc[i].astype(str).tolist()
         preenchidas = [c for c in linha
                        if c and c.lower() not in ("nan", "none", "")]
-        if len(preenchidas) < 3:
+        if len(preenchidas) < 2:
             continue
 
         nao_numericas = sum(
@@ -267,40 +266,14 @@ def ler_planilha(source) -> pd.DataFrame:
         return _ler_excel(source)
 
 
-def diagnosticar(source) -> dict:
-    nome = _achar_nome(source)
-    ext = os.path.splitext(nome)[1]
-    info = {"arquivo": nome, "extensao": ext}
-    try:
-        raw = _achar_bytes(source)
-        info["tamanho_bytes"] = len(raw)
-        info["encoding_detectado"] = _detectar_encoding(raw)
-        if ext in EXT_CSV or ext == "":
-            amostra = raw[:50_000].decode(
-                info["encoding_detectado"], errors="replace"
-            )
-            info["separador_detectado"] = _detectar_separador(amostra)
-    except Exception as e:
-        info["erro_diagnostico"] = str(e)
-    return info
-
-
 # ===========================================================================
-# MAPEAMENTO DE COLUNAS  (regex afrouxada em Data)
+# MAPEAMENTO DE COLUNAS
 # ===========================================================================
 FIELD_SYNONYMS = {
     "Data": [
-        r"^data$",
-        r"^data_",
-        r"_data$",
-        r"^dt",
-        r"^abertura",
-        r"^criado",
-        r"^created",
-        r"^timestamp",
-        r"^inicio",
-        r"^data.*hora",
-        r"^data.*abert",
+        r"^data$", r"^data_", r"_data$", r"^dt", r"^abertura",
+        r"^criado", r"^created", r"^timestamp", r"^inicio",
+        r"^data.*hora", r"^data.*abert",
     ],
     "Data_Encerrado": [
         r"^data_encerrado", r"^data_fechamento", r"^data_conclusao",
@@ -347,29 +320,29 @@ FIELD_SYNONYMS = {
     ],
 }
 
-CAMPO_MINIMO_OBRIGATORIO = "Data"
+# Campos aceitos para o "modo agregado"
+CAMPOS_AGREGADOS_TAG = ("tag", "categoria", "motivo", "assunto",
+                        "tipo", "topico", "classificacao")
+CAMPOS_AGREGADOS_QTD = ("quantidade", "qtd", "contagem", "total",
+                        "count", "freq", "frequencia")
+CAMPOS_AGREGADOS_PCT = ("%", "percentual", "porcentagem", "pct",
+                        "share", "proporcao")
 
 
 # ===========================================================================
-# NORMALIZAÇÃO (endurecida) E DETECÇÃO DE COLUNAS
+# NORMALIZAÇÃO E DETECÇÃO
 # ===========================================================================
 def _normalizar(texto) -> str:
     if texto is None:
         return ""
     texto = str(texto)
-
-    # Remove BOM, aspas, NBSP e caracteres invisíveis comuns
     texto = (texto.replace("\ufeff", "")
                   .replace("\u00a0", " ")
                   .replace("\u200b", "")
                   .replace('"', "")
                   .replace("'", ""))
-
-    # Remove acentos
     texto = unicodedata.normalize("NFKD", texto)
     texto = "".join(c for c in texto if not unicodedata.combining(c))
-
-    # Minúsculas + colapsa separadores em "_"
     texto = texto.strip().lower()
     texto = re.sub(r"[\s\-\.\/\(\)\[\]]+", "_", texto)
     texto = re.sub(r"_+", "_", texto)
@@ -394,89 +367,58 @@ def detectar_colunas(df: pd.DataFrame) -> dict:
 
 
 def _fallback_data(df: pd.DataFrame, mapa: dict) -> dict:
-    """
-    Se a coluna Data não foi encontrada, procura manualmente por
-    qualquer coluna cujo nome contenha 'data', 'dt', 'abert' ou 'criad'.
-    """
     if "Data" in mapa:
         return mapa
-
     for col in df.columns:
         cn = _normalizar(col)
         if any(t in cn for t in ("data", "dt", "abert", "criad")):
-            # Evita pegar 'data_encerrado' como Data
-            if "encerr" in cn or "fech" in cn or "conclus" in cn:
+            if any(t in cn for t in ("encerr", "fech", "conclus")):
                 continue
             mapa["Data"] = col
             return mapa
     return mapa
 
 
+def detectar_modo_agregado(df: pd.DataFrame) -> dict:
+    """
+    Verifica se o arquivo é um resultado agregado (ex.: Tag, Quantidade, %).
+    Devolve um dicionário {tag, qtd, pct} com os nomes reais ou None.
+    """
+    colunas_norm = {col: _normalizar(col) for col in df.columns}
+    achados = {"tag": None, "qtd": None, "pct": None}
+
+    for col, cn in colunas_norm.items():
+        if achados["tag"] is None and any(t in cn for t in CAMPOS_AGREGADOS_TAG):
+            achados["tag"] = col
+        elif achados["qtd"] is None and any(t in cn for t in CAMPOS_AGREGADOS_QTD):
+            achados["qtd"] = col
+        elif achados["pct"] is None and any(t in cn for t in CAMPOS_AGREGADOS_PCT):
+            achados["pct"] = col
+
+    # Também aceita quando a coluna se chama literalmente "%"
+    if achados["pct"] is None:
+        for col in df.columns:
+            if str(col).strip() == "%":
+                achados["pct"] = col
+                break
+
+    # Considera "agregado" se tiver pelo menos a tag + quantidade
+    achados["_eh_agregado"] = bool(achados["tag"] and achados["qtd"])
+    return achados
+
+
 # ===========================================================================
-# LEITURA EM CACHE E VALIDAÇÃO
+# LEITURA EM CACHE
 # ===========================================================================
 @st.cache_data(show_spinner="Lendo planilha...")
-def load_data(uploaded_file, caminho_auto, mtime, tamanho):
-    if uploaded_file is not None:
-        return ler_planilha(uploaded_file)
-    if caminho_auto and os.path.exists(caminho_auto):
-        return ler_planilha(caminho_auto)
-    raise FileNotFoundError("Nenhuma fonte de dados disponível.")
-
-
-def validar_qualidade(df_raw: pd.DataFrame, mapa: dict) -> dict:
-    total = len(df_raw)
-    rel = {"total_linhas": total}
-    rel["linhas_vazias"] = int(df_raw.isna().all(axis=1).sum())
-
-    if "Data" in mapa:
-        datas = pd.to_datetime(df_raw[mapa["Data"]],
-                               errors="coerce", dayfirst=True)
-        rel["datas_invalidas"] = int(datas.isna().sum())
-        if datas.notna().any():
-            rel["data_min"] = datas.min()
-            rel["data_max"] = datas.max()
-
-    for campo_id in ("Chamado", "Protocolo"):
-        if campo_id in mapa:
-            dups = df_raw[mapa[campo_id]].duplicated().sum()
-            rel[f"{campo_id.lower()}_duplicados"] = int(dups)
-
-    if "Status" in mapa:
-        vazios = (df_raw[mapa["Status"]].astype(str).str.strip() == "").sum()
-        rel["status_vazios"] = int(vazios)
-
-    if "Analista" in mapa:
-        vazios = df_raw[mapa["Analista"]].astype(str).str.strip().isin(["", "-"])
-        rel["analista_vazios"] = int(vazios.sum())
-
-    return rel
-
-
-def exibir_relatorio_qualidade(rel: dict):
-    with st.sidebar.expander("🧪 Qualidade da base", expanded=False):
-        st.metric("Linhas totais",
-                  f"{rel['total_linhas']:,}".replace(",", "."))
-        if rel.get("linhas_vazias"):
-            st.warning(f"Linhas em branco: {rel['linhas_vazias']}")
-        if rel.get("datas_invalidas"):
-            st.warning(f"Datas inválidas: {rel['datas_invalidas']}")
-        if "data_min" in rel and "data_max" in rel:
-            st.caption(
-                f"Intervalo: {rel['data_min']:%d/%m/%Y %H:%M} → "
-                f"{rel['data_max']:%d/%m/%Y %H:%M}"
-            )
-        for k in ("chamado_duplicados", "protocolo_duplicados"):
-            if rel.get(k):
-                st.warning(f"{k.replace('_', ' ').title()}: {rel[k]}")
-        if rel.get("status_vazios"):
-            st.warning(f"Status em branco: {rel['status_vazios']}")
-        if rel.get("analista_vazios"):
-            st.warning(f"Analista em branco: {rel['analista_vazios']}")
+def load_data(caminho_ou_arquivo, origem, mtime, tamanho):
+    if origem == "auto":
+        return ler_planilha(caminho_ou_arquivo)
+    return ler_planilha(caminho_ou_arquivo)
 
 
 # ===========================================================================
-# NORMALIZAÇÃO DE MOTIVO
+# HELPERS DE NORMALIZAÇÃO (motivo, status, tempo)
 # ===========================================================================
 def _normalizar_motivo(s: pd.Series) -> pd.Series:
     s = (s.astype(str)
@@ -516,9 +458,6 @@ def _normalizar_motivo(s: pd.Series) -> pd.Series:
     return s
 
 
-# ===========================================================================
-# PADRONIZAÇÃO DE STATUS
-# ===========================================================================
 STATUS_CANONICOS = {
     r"resolv|conclu|fechad|solucion|finalizad|encerrad": "Resolvido",
     r"cancel|ausent|desist":                             "Cancelado",
@@ -539,9 +478,6 @@ def _padronizar_status(serie: pd.Series) -> pd.Series:
     return resultado
 
 
-# ===========================================================================
-# CONVERSÃO FLEXÍVEL DE TEMPO
-# ===========================================================================
 def _converter_tempo_flexivel(serie: pd.Series) -> pd.Series:
     num = pd.to_numeric(serie, errors="coerce")
     if num.notna().mean() > 0.8:
@@ -568,7 +504,7 @@ def _converter_tempo_flexivel(serie: pd.Series) -> pd.Series:
 
 
 # ===========================================================================
-# PREPARAÇÃO DOS DADOS
+# PREPARAÇÃO DOS DADOS (base detalhada)
 # ===========================================================================
 def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
     df = df_raw.copy()
@@ -664,7 +600,7 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
 
 
 # ===========================================================================
-# GRÁFICO DE EVOLUÇÃO
+# GRÁFICOS (base detalhada)
 # ===========================================================================
 def build_time_evolution_chart(df_base):
     df_local = df_base.copy()
@@ -749,6 +685,77 @@ def build_heatmap_hora_dia(df_base):
 
 
 # ===========================================================================
+# RENDERIZAÇÃO — MODO AGREGADO (Tag, Quantidade, %)
+# ===========================================================================
+def render_modo_agregado(df: pd.DataFrame, agregados: dict):
+    st.title("📊 Painel Agregado - Suporte N1")
+    st.caption(
+        "O arquivo carregado é um **resumo** (Tag, Quantidade, %). "
+        "Exibindo painel agregado. Se você quiser os KPIs de tickets, "
+        "carregue o export detalhado (com coluna `Data`)."
+    )
+
+    col_tag = agregados["tag"]
+    col_qtd = agregados["qtd"]
+    col_pct = agregados["pct"]
+
+    df_view = df.copy()
+    df_view[col_qtd] = pd.to_numeric(df_view[col_qtd], errors="coerce")
+    df_view = df_view.dropna(subset=[col_qtd]).sort_values(col_qtd,
+                                                          ascending=False)
+
+    total = int(df_view[col_qtd].sum())
+    n_tags = int(df_view[col_tag].nunique())
+    top_tag = df_view.iloc[0][col_tag] if len(df_view) else "-"
+    top_qtd = int(df_view.iloc[0][col_qtd]) if len(df_view) else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📦 Total", f"{total:,}".replace(",", "."))
+    c2.metric("🏷️ Tags distintas", f"{n_tags}")
+    c3.metric("🥇 Tag líder", str(top_tag)[:30])
+    c4.metric("🔢 Volume da líder", f"{top_qtd:,}".replace(",", "."))
+
+    st.markdown("---")
+
+    col_b, col_p = st.columns([2, 1])
+
+    with col_b:
+        st.markdown("#### 🏷️ Distribuição por Tag")
+        top_n = df_view.head(20)
+        fig = px.bar(
+            top_n, x=col_qtd, y=col_tag, orientation="h",
+            text=col_qtd, color=col_qtd, color_continuous_scale="Blues",
+        )
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            xaxis_title="Quantidade", yaxis_title="",
+            margin=dict(l=10, r=10, t=30, b=10),
+            height=520,
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_p:
+        st.markdown("#### 🥧 Top 10 (proporção)")
+        top10 = df_view.head(10)
+        fig = px.pie(top10, names=col_tag, values=col_qtd, hole=0.5)
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=520)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### 🗂️ Tabela completa")
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+    csv_export = df_view.to_csv(index=False, sep=";").encode("utf-8-sig")
+    st.download_button(
+        label="⬇️ Exportar CSV",
+        data=csv_export,
+        file_name="resumo_agregado_n1.csv",
+        mime="text/csv",
+    )
+
+
+# ===========================================================================
 # CABEÇALHO
 # ===========================================================================
 st.title("📡 Dashboard de Suporte N1 - Telecom")
@@ -786,6 +793,7 @@ elif arquivo_auto_disponivel:
     mtime_dt = datetime.fromtimestamp(mtime_auto)
     st.sidebar.success(
         f"✅ Fonte automática ativa\n\n"
+        f"Arquivo: `{ARQUIVO_AUTO}`\n\n"
         f"Última coleta: **{mtime_dt:%d/%m/%Y %H:%M}**"
     )
     if st.sidebar.button("🔄 Recarregar dados agora"):
@@ -810,12 +818,28 @@ if usar_upload and uploaded_file is None:
 if not usar_upload and not arquivo_auto_disponivel:
     st.stop()
 
+# Identificação clara do arquivo que está sendo lido
+if usar_upload and uploaded_file is not None:
+    nome_fonte = uploaded_file.name
+    origem_fonte = "upload manual"
+else:
+    nome_fonte = ARQUIVO_AUTO
+    origem_fonte = "arquivo automático"
+
+st.info(
+    f"📄 **Lendo:** `{nome_fonte}`  \n"
+    f"🔎 **Origem:** {origem_fonte}"
+)
+
 
 # ===========================================================================
-# LEITURA + DETECÇÃO + VALIDAÇÃO
+# LEITURA + DETECÇÃO
 # ===========================================================================
 try:
-    df_raw = load_data(uploaded_file, ARQUIVO_AUTO, mtime_auto, tamanho_auto)
+    if usar_upload:
+        df_raw = load_data(uploaded_file, "upload", 0, 0)
+    else:
+        df_raw = load_data(ARQUIVO_AUTO, "auto", mtime_auto, tamanho_auto)
 except Exception as erro:
     st.error(f"❌ Não foi possível carregar os dados. Detalhes: {erro}")
     st.stop()
@@ -824,20 +848,29 @@ if df_raw.empty:
     st.error("❌ Arquivo vazio.")
     st.stop()
 
+# 1) Verifica se é um arquivo agregado (Tag, Quantidade, %)
+agregados = detectar_modo_agregado(df_raw)
+if agregados["_eh_agregado"]:
+    render_modo_agregado(df_raw, agregados)
+    st.stop()
+
+# 2) Modo detalhado — exige coluna Data
 mapa_colunas = detectar_colunas(df_raw)
 mapa_colunas = _fallback_data(df_raw, mapa_colunas)
 
-if CAMPO_MINIMO_OBRIGATORIO not in mapa_colunas:
+if "Data" not in mapa_colunas:
     st.error(
-        "❌ Não foi possível identificar a coluna de **Data**. "
-        "Colunas encontradas no arquivo: "
-        + ", ".join(f"`{c}`" for c in df_raw.columns)
+        "❌ Não foi possível identificar a coluna de **Data** e o arquivo "
+        "também não parece ser um resumo agregado.\n\n"
+        "**Colunas encontradas:** " +
+        ", ".join(f"`{c}`" for c in df_raw.columns) +
+        "\n\n**Esperado:** uma coluna como `Data`, `Data_Abertura`, "
+        "`Criado_Em`, `Abertura` ou um arquivo agregado com "
+        "`Tag` + `Quantidade`."
     )
     st.stop()
 
-relatorio = validar_qualidade(df_raw, mapa_colunas)
-exibir_relatorio_qualidade(relatorio)
-
+# ---------------------------------------------------------------- segue normal
 with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=True):
     for campo, col_real in mapa_colunas.items():
         st.markdown(f"- **{campo}** ← `{col_real}`")
@@ -919,7 +952,7 @@ st.markdown("---")
 
 
 # ===========================================================================
-# GRÁFICOS
+# GRÁFICOS (base detalhada)
 # ===========================================================================
 col_g1, col_g2 = st.columns(2)
 
