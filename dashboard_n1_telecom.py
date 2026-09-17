@@ -1,16 +1,34 @@
 """
-Dashboard de Suporte N1 - Telecom (v5.1 - Final)
-================================================
-Correção aplicada: substitui o alias "H" (hora) por "h" — obrigatório
-no pandas 2.2+ / 3.x. Também endurece a escolha de granularidade para
-funcionar com qualquer versão do pandas.
+Dashboard de Suporte N1 - Telecom (v6 - Completo)
+==================================================
+Arquivo único. Leitor universal embutido, KPIs adaptativos, gráficos,
+heatmap, ranking e auditoria.
+
+Formatos suportados:
+  - .csv, .tsv, .txt
+  - .xlsx, .xlsm, .xls, .xlsb, .ods
+  - .json, .parquet, .feather
+
+Recursos de robustez:
+  - Detecção de encoding (utf-8, utf-8-sig, latin-1, cp1252, utf-16)
+  - Detecção de separador (; , \\t | :) com csv.Sniffer + fallback
+  - Detecção automática da linha de cabeçalho (arquivos com banner/título)
+  - Escolha automática da aba do Excel com mais dados
+  - Detecção de magic number (txt que na verdade é xlsx/xls)
+  - Deduplicação por ID/Protocolo (mantém o mais recente)
+  - Normalização de Motivo e Status
+  - Features derivadas (Ano, Mês, Dia, DiaSemana, Hora, FaixaHoraria)
+  - TMA real de (Data_Encerrado − Data) quando disponível
 
 Como executar:
     pip install streamlit pandas plotly openpyxl chardet
+    # opcionais: pyxlsb (xlsb), odfpy (ods), pyarrow (parquet/feather)
     streamlit run dashboard_n1_telecom.py
 """
 
+import csv
 import io
+import json
 import os
 import re
 import unicodedata
@@ -21,6 +39,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# --- opcionais -------------------------------------------------------------
 try:
     import chardet
     _TEM_CHARDET = True
@@ -28,9 +47,9 @@ except ImportError:
     _TEM_CHARDET = False
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # CONFIGURAÇÃO GERAL
-# ---------------------------------------------------------------------------
+# ===========================================================================
 st.set_page_config(
     page_title="Dashboard N1 - Telecom",
     page_icon="📡",
@@ -40,9 +59,259 @@ st.set_page_config(
 ARQUIVO_AUTO = "dados_n1_auto.csv"
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# LEITOR UNIVERSAL (embutido)
+# ===========================================================================
+ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252", "utf-16", "ascii"]
+SEPARADORES = [";", ",", "\t", "|", ":"]
+EXT_CSV = {".csv", ".tsv", ".txt"}
+EXT_EXCEL = {".xlsx", ".xlsm", ".xls", ".xlsb", ".ods"}
+
+
+def _achar_bytes(source) -> bytes:
+    """Devolve bytes de um arquivo em disco, BytesIO ou UploadedFile."""
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8", errors="ignore")
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+        return raw
+    with open(source, "rb") as f:
+        return f.read()
+
+
+def _achar_nome(source) -> str:
+    if hasattr(source, "name"):
+        return str(source.name)
+    if isinstance(source, (str, os.PathLike)):
+        return str(source)
+    return ""
+
+
+def _detectar_encoding(raw: bytes) -> str:
+    if _TEM_CHARDET:
+        try:
+            det = chardet.detect(raw[:200_000])
+            if det and det.get("encoding") and det.get("confidence", 0) > 0.7:
+                return det["encoding"]
+        except Exception:
+            pass
+    return "utf-8-sig"
+
+
+def _detectar_separador(amostra: str) -> str:
+    try:
+        dialect = csv.Sniffer().sniff(amostra, delimiters=";,\t|:")
+        return dialect.delimiter
+    except Exception:
+        for linha in amostra.splitlines():
+            if linha.strip():
+                contagens = {s: linha.count(s) for s in SEPARADORES}
+                melhor = max(contagens, key=contagens.get)
+                if contagens[melhor] > 0:
+                    return melhor
+                break
+        return ";"
+
+
+def _detectar_linha_cabecalho(df_bruto: pd.DataFrame) -> int:
+    """
+    Encontra a linha que parece ser o cabeçalho real de uma tabela.
+    Útil quando o arquivo tem título/banner antes dos dados.
+    """
+    melhor_idx = 0
+    melhor_score = -1
+
+    for i in range(min(20, len(df_bruto))):
+        linha = df_bruto.iloc[i].astype(str).tolist()
+        preenchidas = [c for c in linha
+                       if c and c.lower() not in ("nan", "none", "")]
+        if len(preenchidas) < 3:
+            continue
+
+        nao_numericas = sum(
+            1 for c in preenchidas
+            if not c.replace(".", "").replace(",", "").replace("-", "")
+                 .replace("/", "").replace(":", "").isdigit()
+        )
+        score = nao_numericas * 2 + len(preenchidas)
+
+        if i + 1 < len(df_bruto):
+            prox = df_bruto.iloc[i + 1].astype(str).tolist()
+            preenchidas_prox = [c for c in prox
+                                if c and c.lower() not in ("nan", "none", "")]
+            if len(preenchidas_prox) >= len(preenchidas) - 1:
+                score += 2
+
+        if score > melhor_score:
+            melhor_score = score
+            melhor_idx = i
+
+    return melhor_idx
+
+
+def _ler_csv(raw: bytes) -> pd.DataFrame:
+    enc = _detectar_encoding(raw)
+    try:
+        amostra = raw.decode(enc, errors="replace")[:50_000]
+    except Exception:
+        amostra = raw[:50_000].decode("latin-1", errors="replace")
+
+    sep = _detectar_separador(amostra)
+
+    # 1) Lê sem cabeçalho só para achar a linha do cabeçalho real
+    df_bruto = pd.read_csv(
+        io.BytesIO(raw),
+        sep=sep,
+        encoding=enc,
+        header=None,
+        dtype=str,
+        keep_default_na=False,
+        na_values=[""],
+        engine="python",
+        on_bad_lines="skip",
+    )
+
+    if df_bruto.empty:
+        return df_bruto
+
+    idx_cab = _detectar_linha_cabecalho(df_bruto)
+
+    df = pd.read_csv(
+        io.BytesIO(raw),
+        sep=sep,
+        encoding=enc,
+        header=idx_cab,
+        dtype=str,
+        keep_default_na=False,
+        na_values=[""],
+        engine="python",
+        on_bad_lines="skip",
+    )
+
+    df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed")]
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _ler_excel(source) -> pd.DataFrame:
+    nome = _achar_nome(source).lower()
+    engine = None
+    if nome.endswith(".xlsb"):
+        engine = "pyxlsb"
+    elif nome.endswith(".ods"):
+        engine = "odf"
+
+    if hasattr(source, "read"):
+        raw = _achar_bytes(source)
+        xls = pd.ExcelFile(io.BytesIO(raw), engine=engine)
+    else:
+        xls = pd.ExcelFile(source, engine=engine)
+
+    # Escolhe a aba com mais dados (linhas x colunas)
+    melhor_aba, melhor_score = None, -1
+    for aba in xls.sheet_names:
+        try:
+            tmp = xls.parse(aba, header=None, dtype=str, nrows=50)
+            linhas, colunas = tmp.shape
+            score = linhas * colunas
+            if score > melhor_score:
+                melhor_score = score
+                melhor_aba = aba
+        except Exception:
+            continue
+
+    if melhor_aba is None:
+        raise RuntimeError("Nenhuma aba legível no Excel.")
+
+    df_bruto = xls.parse(melhor_aba, header=None, dtype=str)
+    if df_bruto.empty:
+        return df_bruto
+
+    idx_cab = _detectar_linha_cabecalho(df_bruto)
+    df = xls.parse(melhor_aba, header=idx_cab, dtype=str)
+    df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed")]
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _ler_json(raw: bytes) -> pd.DataFrame:
+    texto = raw.decode(_detectar_encoding(raw), errors="replace")
+    obj = json.loads(texto)
+
+    if isinstance(obj, list):
+        return pd.json_normalize(obj)
+    if isinstance(obj, dict):
+        for chave in ("data", "items", "result", "results",
+                      "rows", "records"):
+            if chave in obj:
+                valor = obj[chave]
+                if isinstance(valor, dict):
+                    for chave2 in ("items", "rows", "records"):
+                        if chave2 in valor:
+                            return pd.json_normalize(valor[chave2])
+                return pd.json_normalize(valor)
+        return pd.json_normalize(obj)
+    raise RuntimeError("Formato JSON não reconhecido.")
+
+
+def ler_planilha(source) -> pd.DataFrame:
+    """Ponto de entrada: aceita caminho, BytesIO ou UploadedFile."""
+    nome = _achar_nome(source).lower()
+    ext = os.path.splitext(nome)[1]
+
+    # CSV / TXT / TSV (com checagem de magic number)
+    if ext in EXT_CSV or ext == "":
+        raw = _achar_bytes(source)
+        if raw[:4] == b"PK\x03\x04":            # xlsx renomeado
+            return _ler_excel(io.BytesIO(raw))
+        if raw[:4] == b"\xd0\xcf\x11\xe0":      # xls renomeado
+            return _ler_excel(io.BytesIO(raw))
+        return _ler_csv(raw)
+
+    if ext in EXT_EXCEL:
+        return _ler_excel(source)
+
+    if ext == ".json":
+        return _ler_json(_achar_bytes(source))
+
+    if ext == ".parquet":
+        return pd.read_parquet(source)
+    if ext == ".feather":
+        return pd.read_feather(source)
+
+    # Fallback
+    try:
+        return _ler_csv(_achar_bytes(source))
+    except Exception:
+        return _ler_excel(source)
+
+
+def diagnosticar(source) -> dict:
+    """Devolve metadados do arquivo (útil para exibir no sidebar)."""
+    nome = _achar_nome(source)
+    ext = os.path.splitext(nome)[1]
+    info = {"arquivo": nome, "extensao": ext}
+    try:
+        raw = _achar_bytes(source)
+        info["tamanho_bytes"] = len(raw)
+        info["encoding_detectado"] = _detectar_encoding(raw)
+        if ext in EXT_CSV or ext == "":
+            amostra = raw[:50_000].decode(
+                info["encoding_detectado"], errors="replace"
+            )
+            info["separador_detectado"] = _detectar_separador(amostra)
+    except Exception as e:
+        info["erro_diagnostico"] = str(e)
+    return info
+
+
+# ===========================================================================
 # MAPEAMENTO DE CAMPOS CANÔNICOS -> SINÔNIMOS
-# ---------------------------------------------------------------------------
+# ===========================================================================
 FIELD_SYNONYMS = {
     "Data": [
         r"^data$", r"^data_abertura", r"^data_criacao", r"^abertura",
@@ -95,9 +364,9 @@ FIELD_SYNONYMS = {
 CAMPO_MINIMO_OBRIGATORIO = "Data"
 
 
-# ---------------------------------------------------------------------------
-# NORMALIZAÇÃO DE TEXTO E DETECÇÃO DE COLUNAS
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# NORMALIZAÇÃO E DETECÇÃO DE COLUNAS
+# ===========================================================================
 def _normalizar(texto) -> str:
     if texto is None:
         return ""
@@ -124,90 +393,26 @@ def detectar_colunas(df: pd.DataFrame) -> dict:
     return mapa
 
 
-# ---------------------------------------------------------------------------
-# LEITURA ROBUSTA (encoding + separador)
-# ---------------------------------------------------------------------------
-ENCODINGS_TENTADOS = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
-SEPARADORES_TENTADOS = [";", ",", "\t", "|"]
-
-
-def _detectar_encoding(raw_bytes: bytes) -> str:
-    if _TEM_CHARDET:
-        try:
-            det = chardet.detect(raw_bytes[:200_000])
-            if det and det.get("encoding") and det.get("confidence", 0) > 0.7:
-                return det["encoding"]
-        except Exception:
-            pass
-    return "utf-8-sig"
-
-
-def _ler_csv_inteligente(source) -> pd.DataFrame:
-    if hasattr(source, "read"):
-        raw = source.read()
-        if isinstance(raw, str):
-            raw = raw.encode("utf-8", errors="ignore")
-    else:
-        with open(source, "rb") as f:
-            raw = f.read()
-
-    encodings = [_detectar_encoding(raw)] + ENCODINGS_TENTADOS
-    vistos = set()
-    ultimo_erro = None
-
-    for enc in encodings:
-        if enc in vistos:
-            continue
-        vistos.add(enc)
-        for sep in SEPARADORES_TENTADOS:
-            try:
-                df = pd.read_csv(
-                    io.BytesIO(raw),
-                    sep=sep,
-                    encoding=enc,
-                    dtype=str,
-                    keep_default_na=False,
-                    na_values=[""],
-                    engine="c",
-                )
-                if df.shape[1] >= 3:
-                    return df
-            except Exception as e:
-                ultimo_erro = e
-                continue
-
-    raise RuntimeError(
-        f"Não foi possível interpretar o CSV. Último erro: {ultimo_erro}"
-    )
-
-
-@st.cache_data(show_spinner="Carregando e validando dados...")
+# ===========================================================================
+# LEITURA EM CACHE E VALIDAÇÃO
+# ===========================================================================
+@st.cache_data(show_spinner="Lendo planilha...")
 def load_data(uploaded_file, caminho_auto, mtime, tamanho):
     if uploaded_file is not None:
-        nome = uploaded_file.name.lower()
-        if nome.endswith(".csv"):
-            return _ler_csv_inteligente(uploaded_file)
-        return pd.read_excel(uploaded_file, dtype=str)
-
+        return ler_planilha(uploaded_file)
     if caminho_auto and os.path.exists(caminho_auto):
-        if caminho_auto.lower().endswith((".xlsx", ".xls")):
-            return pd.read_excel(caminho_auto, dtype=str)
-        return _ler_csv_inteligente(caminho_auto)
-
+        return ler_planilha(caminho_auto)
     raise FileNotFoundError("Nenhuma fonte de dados disponível.")
 
 
-# ---------------------------------------------------------------------------
-# VALIDAÇÃO DE QUALIDADE
-# ---------------------------------------------------------------------------
 def validar_qualidade(df_raw: pd.DataFrame, mapa: dict) -> dict:
     total = len(df_raw)
     rel = {"total_linhas": total}
-
     rel["linhas_vazias"] = int(df_raw.isna().all(axis=1).sum())
 
     if "Data" in mapa:
-        datas = pd.to_datetime(df_raw[mapa["Data"]], errors="coerce", dayfirst=True)
+        datas = pd.to_datetime(df_raw[mapa["Data"]],
+                               errors="coerce", dayfirst=True)
         rel["datas_invalidas"] = int(datas.isna().sum())
         if datas.notna().any():
             rel["data_min"] = datas.min()
@@ -231,7 +436,8 @@ def validar_qualidade(df_raw: pd.DataFrame, mapa: dict) -> dict:
 
 def exibir_relatorio_qualidade(rel: dict):
     with st.sidebar.expander("🧪 Qualidade da base", expanded=False):
-        st.metric("Linhas totais", f"{rel['total_linhas']:,}".replace(",", "."))
+        st.metric("Linhas totais",
+                  f"{rel['total_linhas']:,}".replace(",", "."))
         if rel.get("linhas_vazias"):
             st.warning(f"Linhas em branco: {rel['linhas_vazias']}")
         if rel.get("datas_invalidas"):
@@ -250,9 +456,9 @@ def exibir_relatorio_qualidade(rel: dict):
             st.warning(f"Analista em branco: {rel['analista_vazios']}")
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # NORMALIZAÇÃO DE MOTIVO
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _normalizar_motivo(s: pd.Series) -> pd.Series:
     s = (s.astype(str)
           .str.replace(r"\s+", " ", regex=True)
@@ -291,9 +497,9 @@ def _normalizar_motivo(s: pd.Series) -> pd.Series:
     return s
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # PADRONIZAÇÃO DE STATUS
-# ---------------------------------------------------------------------------
+# ===========================================================================
 STATUS_CANONICOS = {
     r"resolv|conclu|fechad|solucion|finalizad|encerrad": "Resolvido",
     r"cancel|ausent|desist":                             "Cancelado",
@@ -314,9 +520,9 @@ def _padronizar_status(serie: pd.Series) -> pd.Series:
     return resultado
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # CONVERSÃO FLEXÍVEL DE TEMPO
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _converter_tempo_flexivel(serie: pd.Series) -> pd.Series:
     num = pd.to_numeric(serie, errors="coerce")
     if num.notna().mean() > 0.8:
@@ -342,9 +548,9 @@ def _converter_tempo_flexivel(serie: pd.Series) -> pd.Series:
     return serie.map(_parse)
 
 
-# ---------------------------------------------------------------------------
-# PREPARAÇÃO PRINCIPAL DOS DADOS
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# PREPARAÇÃO DOS DADOS
+# ===========================================================================
 def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
     df = df_raw.copy()
     df = df.rename(columns={v: k for k, v in mapa.items()})
@@ -360,11 +566,12 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
         invalidas = int(df["Data"].isna().sum())
         if invalidas > 0:
             st.warning(
-                f"⚠️ {invalidas} registro(s) com data inválida foram descartados."
+                f"⚠️ {invalidas} registro(s) com data inválida "
+                "foram descartados."
             )
             df = df.dropna(subset=["Data"])
 
-    # --- Deduplicação por ID/Protocolo -------------------------------------
+    # --- Deduplicação ------------------------------------------------------
     chave_dedup = None
     if "Chamado" in df.columns:
         chave_dedup = "Chamado"
@@ -383,27 +590,26 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
                 "removidos (mantido o mais recente)."
             )
 
-    # --- Tempos numéricos --------------------------------------------------
+    # --- Tempos ------------------------------------------------------------
     for col in ("Tempo_Espera_Min", "Tempo_Atendimento_Min"):
         if col in df.columns:
             df[col] = _converter_tempo_flexivel(df[col])
 
-    # --- TMA derivado de Data_Encerrado − Data -----------------------------
+    # --- TMA derivado ------------------------------------------------------
     if "Data_Encerrado" in df.columns and "Data" in df.columns:
         delta = (df["Data_Encerrado"] - df["Data"]).dt.total_seconds() / 60.0
         df["TMA_Calculado_Min"] = delta.where(delta > 0)
 
-    # --- Motivo normalizado ------------------------------------------------
+    # --- Motivo / Status ---------------------------------------------------
     if "Motivo" in df.columns:
         df["Motivo_Original"] = df["Motivo"]
         df["Motivo"] = _normalizar_motivo(df["Motivo"])
 
-    # --- Status padronizado ------------------------------------------------
     if "Status" in df.columns:
         df["Status_Original"] = df["Status"]
         df["Status"] = _padronizar_status(df["Status"])
 
-    # --- Textos gerais -----------------------------------------------------
+    # --- Textos ------------------------------------------------------------
     for col in ("Analista", "Urgencia", "Setor", "Solicitante"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
@@ -413,7 +619,7 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
             df["Resolvido_N1"].astype(str).str.strip().str.capitalize()
         )
 
-    # --- Features derivadas de tempo ---------------------------------------
+    # --- Features derivadas ------------------------------------------------
     if "Data" in df.columns:
         df["Ano"] = df["Data"].dt.year
         df["Mes"] = df["Data"].dt.month
@@ -446,17 +652,10 @@ def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # GRÁFICO DE EVOLUÇÃO TEMPORAL
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def build_time_evolution_chart(df_base):
-    """
-    Escolhe granularidade automaticamente:
-      - até 1 dia    -> hora a hora
-      - até 31 dias  -> dia a dia
-      - mais de 31   -> semana a semana
-    Usa aliases compatíveis com pandas 2.2+ ("h", "D", "W").
-    """
     df_local = df_base.copy()
     dt_min = df_local["Data"].min()
     dt_max = df_local["Data"].max()
@@ -475,7 +674,7 @@ def build_time_evolution_chart(df_base):
         return fig
 
     if delta_dias <= 1:
-        # >>> CORREÇÃO: "h" em vez de "H" (pandas 2.2+)
+        # "h" minúsculo: compatível com pandas 2.2+
         df_local["Agrupador"] = df_local["Data"].dt.floor("h")
         faixa = pd.date_range(start=dt_min.floor("h"),
                               end=dt_max.floor("h"), freq="h")
@@ -513,9 +712,9 @@ def build_time_evolution_chart(df_base):
     return fig
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # HEATMAP HORA x DIA DA SEMANA
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def build_heatmap_hora_dia(df_base):
     dias_pt = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
     df_h = df_base.copy()
@@ -542,9 +741,9 @@ def build_heatmap_hora_dia(df_base):
     return fig
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # CABEÇALHO
-# ---------------------------------------------------------------------------
+# ===========================================================================
 st.title("📡 Dashboard de Suporte N1 - Telecom")
 st.caption(
     "Painel automático de indicadores, evolução temporal e auditoria "
@@ -552,9 +751,9 @@ st.caption(
 )
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # FONTE DE DADOS
-# ---------------------------------------------------------------------------
+# ===========================================================================
 st.sidebar.header("⚙️ Fonte de Dados")
 
 arquivo_auto_disponivel = os.path.exists(ARQUIVO_AUTO)
@@ -572,8 +771,9 @@ usar_upload = st.sidebar.toggle(
 uploaded_file = None
 if usar_upload:
     uploaded_file = st.sidebar.file_uploader(
-        "Selecione o arquivo (.csv ou .xlsx)",
-        type=["csv", "xlsx"],
+        "Selecione o arquivo",
+        type=["csv", "tsv", "txt", "xlsx", "xlsm", "xls", "xlsb",
+              "ods", "json", "parquet", "feather"],
     )
 elif arquivo_auto_disponivel:
     mtime_dt = datetime.fromtimestamp(mtime_auto)
@@ -593,176 +793,11 @@ else:
 
 if usar_upload and uploaded_file is None:
     st.info(
-        "👋 Carregue um arquivo .csv/.xlsx **ou** desative o upload "
-        "para usar a coleta automática."
+        "👋 Carregue uma planilha **ou** desative o upload "
+        "para usar a coleta automática.\n\n"
+        "**Formatos aceitos:** .csv, .tsv, .txt, .xlsx, .xlsm, .xls, "
+        ".xlsb, .ods, .json, .parquet, .feather."
     )
     st.stop()
 
-if not usar_upload and not arquivo_auto_disponivel:
-    st.stop()
-
-
-# ---------------------------------------------------------------------------
-# LEITURA + DETECÇÃO + VALIDAÇÃO
-# ---------------------------------------------------------------------------
-try:
-    df_raw = load_data(uploaded_file, ARQUIVO_AUTO, mtime_auto, tamanho_auto)
-except Exception as erro:
-    st.error(f"❌ Não foi possível carregar os dados. Detalhes: {erro}")
-    st.stop()
-
-if df_raw.empty:
-    st.error("❌ Arquivo vazio.")
-    st.stop()
-
-mapa_colunas = detectar_colunas(df_raw)
-
-if CAMPO_MINIMO_OBRIGATORIO not in mapa_colunas:
-    st.error(
-        "❌ Não foi possível identificar a coluna de **Data**. "
-        "Verifique se existe algo como `Data`, `Data_Abertura` ou `Criado_Em`."
-    )
-    st.stop()
-
-relatorio = validar_qualidade(df_raw, mapa_colunas)
-exibir_relatorio_qualidade(relatorio)
-
-with st.sidebar.expander("🧭 Colunas reconhecidas", expanded=False):
-    for campo, col_real in mapa_colunas.items():
-        st.markdown(f"- **{campo}** ← `{col_real}`")
-    nao_mapeadas = [c for c in df_raw.columns if c not in mapa_colunas.values()]
-    if nao_mapeadas:
-        st.markdown("**Não utilizadas:** " +
-                    ", ".join(f"`{c}`" for c in nao_mapeadas))
-
-df = preparar_dados(df_raw, mapa_colunas)
-
-if df.empty:
-    st.error("❌ Após validação, nenhum registro válido restou.")
-    st.stop()
-
-dt_min = df["Data"].min()
-dt_max = df["Data"].max()
-
-st.caption(
-    f"🗓️ Base carregada: **{len(df):,}** chamados, de "
-    f"**{dt_min.strftime('%d/%m/%Y %H:%M')}** "
-    f"até **{dt_max.strftime('%d/%m/%Y %H:%M')}**."
-    .replace(",", ".")
-)
-
-
-# ---------------------------------------------------------------------------
-# KPIs
-# ---------------------------------------------------------------------------
-st.markdown("### 📊 Indicadores da Base")
-
-total = len(df)
-kpis = [("📞 Total de Chamados", f"{total:,}".replace(",", "."))]
-
-if "Resolvido_N1" in df.columns:
-    resolvidos = int((df["Resolvido_N1"] == "Sim").sum())
-    taxa = (resolvidos / total * 100) if total else 0.0
-    kpis.append(("✅ Taxa de Resolução (FCR)", f"{taxa:.1f}%"))
-elif "Status" in df.columns:
-    status_lower = df["Status"].str.lower()
-    resolvidos = int(status_lower.str.contains("resolvido", na=False).sum())
-    taxa = (resolvidos / total * 100) if total else 0.0
-    kpis.append(("✅ Taxa de Resolução (N1)", f"{taxa:.1f}%"))
-
-    cancelados = int(status_lower.str.contains("cancelado", na=False).sum())
-    taxa_canc = (cancelados / total * 100) if total else 0.0
-    kpis.append(("🚫 Taxa de Cancelamento", f"{taxa_canc:.1f}%"))
-
-if "Tempo_Atendimento_Min" in df.columns:
-    tma = df["Tempo_Atendimento_Min"].mean()
-    kpis.append(("🎧 TMA Médio", f"{tma:.1f} min" if pd.notna(tma) else "N/A"))
-elif "TMA_Calculado_Min" in df.columns:
-    tma = df["TMA_Calculado_Min"].mean()
-    if pd.notna(tma):
-        kpis.append(("🎧 TMA Médio (Encerr. − Abertura)", f"{tma:.1f} min"))
-
-if "Tempo_Espera_Min" in df.columns:
-    tme = df["Tempo_Espera_Min"].mean()
-    kpis.append(("⏱️ TME Médio", f"{tme:.1f} min" if pd.notna(tme) else "N/A"))
-
-if "Analista" in df.columns:
-    n = df["Analista"].nunique()
-    kpis.append(("👥 Analistas Ativos", f"{n}"))
-
-if "Status" in df.columns:
-    em_aberto = df["Status"].str.lower().str.contains(
-        r"em aberto|novo|aberto|aguardando|pendente",
-        regex=True, na=False
-    ).sum()
-    kpis.append(("📬 Em Aberto / Andamento", f"{int(em_aberto)}"))
-
-COLS = 4
-for i in range(0, len(kpis), COLS):
-    linha = kpis[i:i + COLS]
-    cols = st.columns(len(linha))
-    for col, (titulo, valor) in zip(cols, linha):
-        col.metric(titulo, valor)
-
-st.markdown("---")
-
-
-# ---------------------------------------------------------------------------
-# GRÁFICOS
-# ---------------------------------------------------------------------------
-col_g1, col_g2 = st.columns(2)
-
-with col_g1:
-    if "Motivo" in df.columns:
-        st.markdown("#### 🔎 Top Assuntos / Motivos")
-        mc = df["Motivo"].value_counts().head(15).reset_index()
-        mc.columns = ["Motivo", "Quantidade"]
-        fig = px.bar(mc, x="Quantidade", y="Motivo", orientation="h",
-                     text="Quantidade", color="Quantidade",
-                     color_continuous_scale="Blues")
-        fig.update_layout(
-            yaxis={"categoryorder": "total ascending"},
-            showlegend=False, coloraxis_showscale=False,
-            xaxis_title="Nº de Chamados", yaxis_title="",
-            margin=dict(l=10, r=10, t=30, b=10),
-        )
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("ℹ️ Sem coluna de Motivo/Assunto.")
-
-with col_g2:
-    st.markdown("#### 📈 Evolução de Volume na Base")
-    st.plotly_chart(build_time_evolution_chart(df), use_container_width=True)
-
-
-col_g3, col_g4 = st.columns(2)
-
-with col_g3:
-    if "Status" in df.columns:
-        st.markdown("#### 📌 Distribuição por Status")
-        sc = df["Status"].value_counts().reset_index()
-        sc.columns = ["Status", "Quantidade"]
-        fig = px.pie(sc, names="Status", values="Quantidade", hole=0.5)
-        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-
-with col_g4:
-    if "Analista" in df.columns:
-        st.markdown("#### 🧑‍💻 Top Analistas por Volume")
-        ac = df["Analista"].value_counts().head(15).reset_index()
-        ac.columns = ["Analista", "Quantidade"]
-        fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
-                     text="Quantidade", color="Quantidade",
-                     color_continuous_scale="Greens")
-        fig.update_layout(
-            yaxis={"categoryorder": "total ascending"},
-            showlegend=False, coloraxis_showscale=False,
-            xaxis_title="Nº de Chamados", yaxis_title="",
-            margin=dict(l=10, r=10, t=30, b=10),
-        )
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
-
-
-# --- Heatmap Hora x Dia da Semana ---------------------------------
+if not usar_upload and not
