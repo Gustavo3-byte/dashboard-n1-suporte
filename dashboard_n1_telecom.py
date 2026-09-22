@@ -1024,9 +1024,9 @@ def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
         )
         return pio.to_html(fig, include_plotlyjs=False, full_html=False)
 
-    bar_n1 = _fig_bar(df_n1, "🧑‍💻 N1 — Top 20 Tags",
+    bar_n1 = _fig_bar(df_n1, "🧑‍💻 N1",
                       [[0, "#E6F2F6"], [1, AZUL_MARCA]], AZUL_MARCA)
-    bar_n2 = _fig_bar(df_n2, "🛠️ N2 — Top 20 Tags",
+    bar_n2 = _fig_bar(df_n2, "🛠️ N2",
                       [[0, "#FBEBDD"], [1, LARANJA_LOGO]], LARANJA_LOGO)
 
     def _tabela_html(df_nivel, classe_extra=""):
