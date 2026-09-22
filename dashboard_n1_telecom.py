@@ -947,20 +947,36 @@ def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
                                 titulo="Resumo por Tag - Suporte N1"):
     """
     Gera um HTML focado em TAGS + quantidades, com split N1 x N2.
-    Espera que df_view já tenha a coluna 'Nível' preenchida.
-    Top 20 barras em cada nível + Top 10 pizza + tabelas completas.
+    Aplica filtro agressivo para eliminar 'nan' e outros lixos.
     """
     import plotly.io as pio
 
-    # ---------------------------------------------------- Limpeza
+    # ===================================================================
+    # LIMPEZA AGRESSIVA (mesma lógica do painel)
+    # ===================================================================
     df_view = df_view.copy()
     df_view[col_qtd] = pd.to_numeric(df_view[col_qtd], errors="coerce")
+    tag_crua = df_view[col_tag]
+
+    LIXO = {"", "nan", "none", "null", "n/a", "na", "-", "--",
+            "sem tag", "sem_tag", "indefinido", "desconhecido",
+            "0", "0.0", "false", "true"}
+
+    def _tag_valida(v) -> bool:
+        if pd.isna(v):
+            return False
+        s = str(v).strip()
+        if not s:
+            return False
+        if s.lower() in LIXO:
+            return False
+        if not re.search(r"[A-Za-zÀ-ÿ]", s):
+            return False
+        return True
+
+    mask = tag_crua.map(_tag_valida)
+    df_view = df_view[mask].copy()
     df_view[col_tag] = df_view[col_tag].astype(str).str.strip()
-    df_view = df_view[
-        ~df_view[col_tag].str.lower().isin(
-            ["", "nan", "none", "null", "-", "n/a", "na"]
-        )
-    ]
     df_view = (df_view.dropna(subset=[col_qtd])
                       .sort_values(col_qtd, ascending=False)
                       .reset_index(drop=True))
@@ -980,7 +996,6 @@ def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
     n_tags = int(df_view[col_tag].nunique())
     top_tag = str(df_view.iloc[0][col_tag]) if len(df_view) else "-"
 
-    # ---------------------------------------------------- Helper gráficos
     def _fig_bar(df_nivel, titulo_b, cor_escala, cor_texto):
         top = df_nivel.head(20)
         if top.empty:
@@ -1014,7 +1029,6 @@ def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
     bar_n2 = _fig_bar(df_n2, "🛠️ N2 — Top 20 Tags",
                       [[0, "#FBEBDD"], [1, LARANJA_LOGO]], LARANJA_LOGO)
 
-    # ---------------------------------------------------- Tabelas
     def _tabela_html(df_nivel, classe_extra=""):
         if df_nivel.empty:
             return '<p style="color:#4B5B63;">Nenhuma tag nesta categoria.</p>'
@@ -1034,7 +1048,6 @@ def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
     tabela_n1 = _tabela_html(df_n1)
     tabela_n2 = _tabela_html(df_n2, "n2")
 
-    # ---------------------------------------------------- Logo/mascote
     logo_html = (
         f'<img src="data:image/png;base64,{LOGO_BASE64}" alt="Logo" '
         f'class="banner-logo" />' if LOGO_BASE64 else ""
@@ -1046,7 +1059,6 @@ def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
         f'</div>' if MASCOTE_BASE64 else ""
     )
 
-    # ---------------------------------------------------- HTML final
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1343,8 +1355,6 @@ def render_dashboard_os(df_base):
 
 
 # ===========================================================================
-# MODO AGREGADO (Tag/Quantidade/%)
-# ===========================================================================
 def render_modo_agregado(df: pd.DataFrame, agregados: dict):
     render_banner_marca()
     st.caption(
@@ -1356,18 +1366,52 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
     col_tag = agregados["tag"]
     col_qtd = agregados["qtd"]
 
-    # --- Limpeza ---------------------------------------------------------
+    # ===================================================================
+    # LIMPEZA AGRESSIVA: remove linhas com tag inválida/vazia/"nan"
+    # ===================================================================
     df_view = df.copy()
+
+    # 1) Converte quantidade
     df_view[col_qtd] = pd.to_numeric(df_view[col_qtd], errors="coerce")
+
+    # 2) Guarda série crua da tag (antes de qualquer conversão)
+    tag_crua = df_view[col_tag]
+
+    # 3) Constrói máscara linha a linha:
+    #    - não pode ser nulo (NaN, None, pd.NA)
+    #    - depois de virar texto e limpar espaços, não pode ser vazio
+    #    - não pode ser um dos rótulos-lixo conhecidos
+    #    - precisa conter pelo menos uma letra (elimina "0", "-", "  ")
+    LIXO = {"", "nan", "none", "null", "n/a", "na", "-", "--",
+            "sem tag", "sem_tag", "indefinido", "desconhecido",
+            "0", "0.0", "false", "true"}
+
+    def _tag_valida(v) -> bool:
+        if pd.isna(v):
+            return False
+        s = str(v).strip()
+        if not s:
+            return False
+        if s.lower() in LIXO:
+            return False
+        if not re.search(r"[A-Za-zÀ-ÿ]", s):  # precisa ter alguma letra
+            return False
+        return True
+
+    mask = tag_crua.map(_tag_valida)
+    df_view = df_view[mask].copy()
+
+    # 4) Normaliza a coluna tag como texto limpo
     df_view[col_tag] = df_view[col_tag].astype(str).str.strip()
-    df_view = df_view[
-        ~df_view[col_tag].str.lower().isin(
-            ["", "nan", "none", "null", "-", "n/a", "na"]
-        )
-    ]
+
+    # 5) Ordena por quantidade e reindexa
     df_view = (df_view.dropna(subset=[col_qtd])
                       .sort_values(col_qtd, ascending=False)
                       .reset_index(drop=True))
+
+    if df_view.empty:
+        st.warning("⚠️ Nenhuma tag válida encontrada no arquivo após limpeza.")
+        st.stop()
 
     # --- Classificação N1 x N2 ------------------------------------------
     tags_unicas = df_view[col_tag].dropna().astype(str).unique().tolist()
@@ -1464,7 +1508,6 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
         file_name="resumo_agregado_n1.csv",
         mime="text/csv",
     )
-
 
 # ===========================================================================
 # CABEÇALHO
