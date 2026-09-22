@@ -950,20 +950,26 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
 
 
 def _criar_dashboard_html(df_base, os_df=None,
-                          titulo="Dashboard de Suporte N1"):
+                          titulo="Dashboard de Suporte N1 - Telecom"):
     """
-    Gera um HTML único com KPIs (em cartões) e todos os gráficos Plotly.
+    Gera um HTML único, visualmente idêntico ao dashboard Streamlit:
+      - Banner com gradiente da marca + logo (se LOGO_BASE64 estiver setado)
+      - KPI cards iguais aos st.metric (borda superior azul, gradiente sutil)
+      - Gráficos com paleta da marca e títulos em azul
+      - Ranking de Analistas em tabela estilizada
+      - Rodapé com mascote (se MASCOTE_BASE64 estiver setado)
     Não depende de kaleido nem Pillow — só do plotly.
     """
     import plotly.io as pio
 
+    # ---------------------------------------------------------------- KPIs
     if "Data" not in df_base.columns and "Quantidade" in df_base.columns:
         total = int(pd.to_numeric(df_base["Quantidade"],
                                   errors="coerce").fillna(0).sum())
     else:
         total = len(df_base)
 
-    resolvidos = cancelados = 0
+    resolvidos = cancelados = em_aberto = 0
     if "Status" in df_base.columns:
         status = df_base["Status"].astype(str).str.lower()
         resolvidos = int(status.str.contains(
@@ -971,74 +977,235 @@ def _criar_dashboard_html(df_base, os_df=None,
             regex=True, na=False).sum())
         cancelados = int(status.str.contains(
             "cancel|ausent|desist", regex=True, na=False).sum())
+        em_aberto = int(status.str.contains(
+            r"em aberto|novo|aberto|aguardando|pendente",
+            regex=True, na=False).sum())
+
+    taxa_res = (resolvidos / total * 100) if total else 0.0
+    taxa_canc = (cancelados / total * 100) if total else 0.0
+
+    tma = None
+    if "Tempo_Atendimento_Min" in df_base.columns:
+        tma = df_base["Tempo_Atendimento_Min"].mean()
+    elif "TMA_Calculado_Min" in df_base.columns:
+        tma = df_base["TMA_Calculado_Min"].mean()
+
+    n_analistas = (df_base["Analista"].nunique()
+                   if "Analista" in df_base.columns else 0)
 
     os_total = len(os_df) if os_df is not None else 0
 
     def _card(label, valor):
         return (
-            f'<div style="flex:1;min-width:200px;background:#F5F8FA;'
-            f'border:2px solid #D8E3E8;border-radius:16px;padding:18px;">'
-            f'<div style="color:#4B5B63;font-size:13px;font-weight:700;'
-            f'letter-spacing:.5px;">{label}</div>'
-            f'<div style="color:#00688A;font-size:38px;font-weight:700;">'
-            f'{valor}</div></div>'
+            f'<div class="kpi-card">'
+            f'  <div class="kpi-label">{label}</div>'
+            f'  <div class="kpi-value">{valor}</div>'
+            f'</div>'
         )
 
-    cards_html = (
-        '<div style="display:flex;gap:18px;flex-wrap:wrap;'
-        'margin:18px 0 26px 0;">'
-        + _card("TOTAL DE ATENDIMENTOS", f"{total:,}".replace(",", "."))
-        + _card("RESOLVIDOS", f"{resolvidos:,}".replace(",", "."))
-        + _card("CANCELADOS", f"{cancelados:,}".replace(",", "."))
-        + _card("ABERTURAS DE O.S.", f"{os_total:,}".replace(",", "."))
-        + '</div>'
-    )
+    kpis_html = '<div class="kpi-grid">'
+    kpis_html += _card("📞 Total de Chamados",
+                       f"{total:,}".replace(",", "."))
+    kpis_html += _card("✅ Taxa de Resolução (N1)", f"{taxa_res:.1f}%")
+    kpis_html += _card("🚫 Taxa de Cancelamento", f"{taxa_canc:.1f}%")
+    kpis_html += _card("📬 Em Aberto / Andamento",
+                       f"{em_aberto:,}".replace(",", "."))
+    kpis_html += _card("👥 Analistas Ativos", f"{n_analistas}")
+    kpis_html += _card("🛠️ Aberturas de O.S.",
+                       f"{os_total:,}".replace(",", "."))
+    if tma is not None and pd.notna(tma):
+        kpis_html += _card("🎧 TMA Médio", f"{tma:.1f} min")
+    kpis_html += '</div>'
 
+    # ---------------------------------------------------------------- Gráficos
     blocos = []
+
     if "Data" in df_base.columns:
         fig_vol = build_time_evolution_chart(df_base)
-        fig_vol.update_layout(title="Evolução de Volume",
-                              height=520, font=dict(size=16))
-        blocos.append(pio.to_html(fig_vol, include_plotlyjs=False,
-                                  full_html=False))
+        fig_vol.update_layout(
+            title="Evolução de Volume", height=520,
+            font=dict(size=15, color="#4B5B63"),
+            title_font=dict(size=18, color=AZUL_MARCA),
+            plot_bgcolor="white", paper_bgcolor="white",
+            margin=dict(l=60, r=30, t=70, b=60),
+        )
+        fig_vol.update_traces(line=dict(color=AZUL_MARCA, width=3))
+        blocos.append(("📈 Evolução de Volume",
+                       pio.to_html(fig_vol, include_plotlyjs=False,
+                                   full_html=False)))
 
     if "Motivo" in df_base.columns:
         mc = df_base["Motivo"].value_counts().head(12).reset_index()
         mc.columns = ["Motivo", "Quantidade"]
         fig_mot = px.bar(mc, x="Quantidade", y="Motivo", orientation="h",
                          text="Quantidade", color="Quantidade",
-                         color_continuous_scale="Blues")
+                         color_continuous_scale=[[0, "#E6F2F6"],
+                                                 [1, AZUL_MARCA]])
         fig_mot.update_layout(
-            title="Atendimentos por Motivo", height=620,
+            title="Atendimentos por Motivo", height=560,
+            font=dict(size=14, color="#4B5B63"),
+            title_font=dict(size=18, color=AZUL_MARCA),
             yaxis={"categoryorder": "total ascending"},
             showlegend=False, coloraxis_showscale=False,
-            margin=dict(l=10, r=10, t=55, b=10),
+            plot_bgcolor="white", paper_bgcolor="white",
+            margin=dict(l=60, r=30, t=70, b=50),
         )
-        fig_mot.update_traces(textposition="outside")
-        blocos.append(pio.to_html(fig_mot, include_plotlyjs=False,
-                                  full_html=False))
+        fig_mot.update_traces(textposition="outside",
+                              textfont=dict(color=AZUL_MARCA, size=13))
+        blocos.append(("🔎 Top Assuntos / Motivos",
+                       pio.to_html(fig_mot, include_plotlyjs=False,
+                                   full_html=False)))
+
+    if "Status" in df_base.columns:
+        sc = df_base["Status"].value_counts().reset_index()
+        sc.columns = ["Status", "Quantidade"]
+        fig_st = px.pie(
+            sc, names="Status", values="Quantidade", hole=0.5,
+            color_discrete_sequence=[AZUL_MARCA, TEAL_LOGO,
+                                     LARANJA_LOGO, ROSA_LOGO,
+                                     AZUL_MARCA_CLARO],
+        )
+        fig_st.update_traces(textposition="inside",
+                             textinfo="percent+label",
+                             insidetextfont=dict(size=12, color="white"))
+        fig_st.update_layout(
+            title="Distribuição por Status", height=520,
+            font=dict(size=14, color="#4B5B63"),
+            title_font=dict(size=18, color=AZUL_MARCA),
+            margin=dict(l=30, r=30, t=70, b=30),
+            legend=dict(orientation="h", yanchor="top", y=-0.05,
+                        xanchor="center", x=0.5),
+        )
+        blocos.append(("📌 Distribuição por Status",
+                       pio.to_html(fig_st, include_plotlyjs=False,
+                                   full_html=False)))
+
+    if "Analista" in df_base.columns:
+        ac = df_base["Analista"].value_counts().head(12).reset_index()
+        ac.columns = ["Analista", "Quantidade"]
+        fig_an = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
+                        text="Quantidade", color="Quantidade",
+                        color_continuous_scale=[[0, "#E8F5F5"],
+                                                [1, TEAL_LOGO]])
+        fig_an.update_layout(
+            title="Top Analistas por Volume", height=520,
+            font=dict(size=14, color="#4B5B63"),
+            title_font=dict(size=18, color=AZUL_MARCA),
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            plot_bgcolor="white", paper_bgcolor="white",
+            margin=dict(l=60, r=30, t=70, b=50),
+        )
+        fig_an.update_traces(textposition="outside",
+                             textfont=dict(color=AZUL_MARCA, size=13))
+        blocos.append(("🧑‍💻 Top Analistas por Volume",
+                       pio.to_html(fig_an, include_plotlyjs=False,
+                                   full_html=False)))
+
+    if "Data" in df_base.columns and "Hora" in df_base.columns:
+        fig_heat = build_heatmap_hora_dia(df_base)
+        fig_heat.update_layout(
+            title="Heatmap — Hora × Dia da Semana", height=420,
+            font=dict(size=13, color="#4B5B63"),
+            title_font=dict(size=18, color=AZUL_MARCA),
+            margin=dict(l=60, r=30, t=70, b=50),
+        )
+        blocos.append(("🔥 Heatmap de Volume",
+                       pio.to_html(fig_heat, include_plotlyjs=False,
+                                   full_html=False)))
 
     if os_df is not None and not os_df.empty and "Motivo" in os_df.columns:
         oc = os_df["Motivo"].value_counts().head(12).reset_index()
         oc.columns = ["Motivo", "Quantidade"]
         fig_os = px.bar(oc, x="Quantidade", y="Motivo", orientation="h",
                         text="Quantidade", color="Quantidade",
-                        color_continuous_scale="Oranges")
+                        color_continuous_scale=[[0, "#FBEBDD"],
+                                                [1, LARANJA_LOGO]])
         fig_os.update_layout(
-            title="Aberturas de O.S. por Motivo", height=620,
+            title="Aberturas de O.S. por Motivo", height=520,
+            font=dict(size=14, color="#4B5B63"),
+            title_font=dict(size=18, color=LARANJA_LOGO),
             yaxis={"categoryorder": "total ascending"},
             showlegend=False, coloraxis_showscale=False,
-            margin=dict(l=10, r=10, t=55, b=10),
+            plot_bgcolor="white", paper_bgcolor="white",
+            margin=dict(l=60, r=30, t=70, b=50),
         )
-        fig_os.update_traces(textposition="outside")
-        blocos.append(pio.to_html(fig_os, include_plotlyjs=False,
-                                  full_html=False))
+        fig_os.update_traces(textposition="outside",
+                             textfont=dict(color=LARANJA_LOGO, size=13))
+        blocos.append(("🛠️ Aberturas de O.S. por Motivo",
+                       pio.to_html(fig_os, include_plotlyjs=False,
+                                   full_html=False)))
 
-    corpo_graficos = "\n".join(
-        f'<div style="background:white;border-radius:14px;padding:18px;'
-        f'margin-bottom:22px;box-shadow:0 2px 10px rgba(0,0,0,0.06);">'
-        f'{b}</div>'
-        for b in blocos
+    # ---- Ranking de Analistas em tabela HTML ----------------------------
+    ranking_html = ""
+    if "Analista" in df_base.columns and "Status" in df_base.columns:
+        df_rank = df_base.copy()
+        df_rank["Resolvido"] = df_rank["Status"].str.lower().str.contains(
+            "resolvido", na=False
+        )
+        df_rank["Cancelado"] = df_rank["Status"].str.lower().str.contains(
+            "cancelado", na=False
+        )
+        aggs = {
+            "Total": ("Status", "size"),
+            "Resolvidos": ("Resolvido", "sum"),
+            "Cancelados": ("Cancelado", "sum"),
+        }
+        if "TMA_Calculado_Min" in df_rank.columns:
+            aggs["TMA Médio (min)"] = ("TMA_Calculado_Min", "mean")
+
+        ranking = df_rank.groupby("Analista").agg(**aggs).reset_index()
+        ranking["Taxa Resolução (%)"] = (
+            ranking["Resolvidos"] / ranking["Total"] * 100
+        ).round(1)
+        ranking["Taxa Cancelamento (%)"] = (
+            ranking["Cancelados"] / ranking["Total"] * 100
+        ).round(1)
+        if "TMA Médio (min)" in ranking.columns:
+            ranking["TMA Médio (min)"] = ranking["TMA Médio (min)"].round(1)
+        ranking = ranking.sort_values("Total", ascending=False)
+
+        cabecalhos = "".join(f"<th>{c}</th>" for c in ranking.columns)
+        linhas = ""
+        for _, row in ranking.iterrows():
+            celulas = ""
+            for c in ranking.columns:
+                v = row[c]
+                if isinstance(v, float):
+                    celulas += f"<td>{v:.1f}</td>"
+                else:
+                    celulas += f"<td>{v}</td>"
+            linhas += f"<tr>{celulas}</tr>"
+
+        ranking_html = f"""
+        <div class="bloco">
+          <h2>🏆 Ranking Detalhado de Analistas</h2>
+          <table class="tabela">
+            <thead><tr>{cabecalhos}</tr></thead>
+            <tbody>{linhas}</tbody>
+          </table>
+        </div>
+        """
+
+    blocos_html = ""
+    for titulo_b, html_b in blocos:
+        blocos_html += (
+            f'<div class="bloco">'
+            f'  <h2>{titulo_b}</h2>'
+            f'  {html_b}'
+            f'</div>'
+        )
+
+    # ---------------------------------------------------------------- HTML
+    logo_html = (
+        f'<img src="data:image/png;base64,{LOGO_BASE64}" alt="Logo" '
+        f'class="banner-logo" />' if LOGO_BASE64 else ""
+    )
+    mascote_html = (
+        f'<div class="rodape-mascote">'
+        f'  <img src="data:image/png;base64,{MASCOTE_BASE64}" alt="Mascote" />'
+        f'  <p>Squad N1 — Telecom · Time mandando bem! 🎉</p>'
+        f'</div>' if MASCOTE_BASE64 else ""
     )
 
     html = f"""<!DOCTYPE html>
@@ -1048,20 +1215,129 @@ def _criar_dashboard_html(df_base, os_df=None,
 <title>{titulo}</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-          Roboto, sans-serif; background:#EEF3F6; margin:0; padding:32px; }}
-  h1 {{ color:#00688A; margin:0 0 4px 0; font-size:28px; }}
-  .sub {{ color:#4B5B63; margin:0 0 22px 0; font-size:14px; }}
-  .container {{ max-width:1400px; margin:0 auto; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #EEF3F6; margin: 0; padding: 0; color: #2C3E50;
+  }}
+  .container {{ max-width: 1400px; margin: 0 auto; padding: 26px; }}
+
+  /* Banner */
+  .banner {{
+    background: linear-gradient(90deg, {AZUL_MARCA} 0%, {TEAL_LOGO} 100%);
+    border-radius: 12px;
+    padding: 18px 26px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 22px;
+    box-shadow: 0 4px 14px rgba(0,104,138,0.25);
+  }}
+  .banner-logo {{ height: 46px; }}
+  .banner-textos h1 {{
+    color: #FFFFFF; margin: 0; font-size: 1.6rem;
+    line-height: 1.2; font-weight: 700;
+  }}
+  .banner-textos p {{
+    color: #EAF6F8; margin: 4px 0 0 0; font-size: 0.92rem;
+  }}
+
+  /* KPIs */
+  .kpi-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 26px;
+  }}
+  .kpi-card {{
+    background: linear-gradient(180deg,
+                rgba(0,104,138,0.06) 0%,
+                rgba(0,104,138,0.00) 100%);
+    border-top: 3px solid {AZUL_MARCA};
+    border-radius: 8px;
+    padding: 14px 16px 12px 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+  }}
+  .kpi-label {{
+    font-size: 12.5px; color: #4B5B63; font-weight: 600;
+    letter-spacing: .3px; margin-bottom: 6px;
+  }}
+  .kpi-value {{
+    color: {AZUL_MARCA}; font-size: 26px;
+    font-weight: 700; line-height: 1.1;
+  }}
+
+  /* Blocos de gráficos */
+  .bloco {{
+    background: #FFFFFF;
+    border-radius: 12px;
+    padding: 16px 20px 12px 20px;
+    margin-bottom: 22px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+  }}
+  .bloco h2 {{
+    color: {AZUL_MARCA}; font-size: 17px; margin: 0 0 8px 0;
+    padding-bottom: 8px; border-bottom: 2px solid rgba(0,104,138,0.10);
+  }}
+
+  /* Tabela */
+  .tabela {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  .tabela th {{
+    background: {AZUL_MARCA}; color: white; padding: 10px 12px;
+    text-align: left; font-weight: 600;
+  }}
+  .tabela td {{ padding: 8px 12px; border-bottom: 1px solid #E8EEF1; }}
+  .tabela tr:nth-child(even) td {{ background: #F7FAFB; }}
+  .tabela tr:hover td {{ background: rgba(0,104,138,0.06); }}
+
+  /* Rodapé */
+  .rodape {{
+    text-align: center; margin: 30px 0 10px 0; padding: 20px;
+    color: #4B5B63; font-size: 12px;
+  }}
+  .rodape-mascote img {{ max-width: 130px; margin-bottom: 6px; }}
+  .rodape-mascote p {{
+    color: {AZUL_MARCA}; font-weight: 600; font-size: 13px;
+    margin: 4px 0 0 0;
+  }}
+
+  /* Impressão */
+  @media print {{
+    body {{ background: white; }}
+    .container {{ max-width: 100%; padding: 10px; }}
+    .bloco {{ box-shadow: none; border: 1px solid #E8EEF1;
+              page-break-inside: avoid; }}
+    .kpi-card {{ page-break-inside: avoid; }}
+  }}
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>📡 {titulo}</h1>
-  <p class="sub">Squad N1 — Telecom · Gerado em
-  {datetime.now():%d/%m/%Y %H:%M}</p>
-  {cards_html}
-  {corpo_graficos}
+
+  <div class="banner">
+    {logo_html}
+    <div class="banner-textos">
+      <h1>📡 {titulo}</h1>
+      <p>Painel automático de indicadores, evolução temporal e
+         auditoria — Squad N1</p>
+    </div>
+  </div>
+
+  <div class="bloco">
+    <h2>📊 Indicadores da Base</h2>
+    {kpis_html}
+  </div>
+
+  {blocos_html}
+
+  {ranking_html}
+
+  <div class="rodape">
+    Gerado em {datetime.now():%d/%m/%Y %H:%M}
+    {mascote_html}
+  </div>
+
 </div>
 </body>
 </html>"""
@@ -1072,48 +1348,52 @@ def _criar_dashboard_html(df_base, os_df=None,
 def render_exportacao_dashboard(df_base, os_df=None):
     st.markdown("### 🖼️ Exportação do Dashboard")
     st.caption(
-        "Gera uma imagem única em alta resolução com o volume de "
-        "atendimentos, principais gráficos e uma área específica para "
-        "as aberturas de O.S."
+        "Gera uma versão **idêntica ao dashboard** para compartilhar. "
+        "Primeiro tenta exportar como PNG (imagem única). Se o ambiente "
+        "não tiver o `kaleido` funcionando, cai automaticamente para "
+        "HTML com o mesmo layout visual."
     )
 
-    # --- Tentativa de PNG ---------------------------------------------------
-    try:
-        png = _criar_dashboard_png(df_base, os_df=os_df)
-        st.download_button(
-            "⬇️ Exportar Dashboard em PNG — Alta Qualidade",
-            data=png,
-            file_name="dashboard_suporte_n1_alta_qualidade.png",
-            mime="image/png",
-            use_container_width=True,
-        )
-        return
-    except RuntimeError as exc:
-        st.warning(
-            "⚠️ **Não foi possível gerar o PNG.** "
-            "Usando o fallback em HTML, que você pode abrir no navegador "
-            "e salvar como PDF ou imprimir como imagem.\n\n"
-            f"**Motivo técnico:** {exc}"
-        )
+    col1, col2 = st.columns(2)
 
-    # --- Fallback HTML ------------------------------------------------------
-    try:
-        html = _criar_dashboard_html(df_base, os_df=os_df)
-        st.download_button(
-            "⬇️ Exportar Dashboard em HTML (abre no navegador)",
-            data=html,
-            file_name="dashboard_suporte_n1.html",
-            mime="text/html",
-            use_container_width=True,
-        )
-        st.caption(
-            "💡 Depois de baixar o HTML: abra no Chrome/Edge → "
-            "**Ctrl+P** → **Salvar como PDF** (ou \"Microsoft Print to PDF\"). "
-            "O resultado sai em alta qualidade, igual ao PNG."
-        )
-    except Exception as exc:
-        st.error(f"❌ Não foi possível gerar nem o HTML de exportação: {exc}")
+    # --- PNG em alta qualidade ---------------------------------------------
+    with col1:
+        st.markdown("##### 🖼️ PNG (imagem única)")
+        try:
+            png = _criar_dashboard_png(df_base, os_df=os_df)
+            st.download_button(
+                "⬇️ Exportar PNG — Alta Qualidade",
+                data=png,
+                file_name="dashboard_suporte_n1.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+        except RuntimeError as exc:
+            st.warning("PNG indisponível neste ambiente.")
+            with st.expander("Ver motivo técnico"):
+                st.code(str(exc), language="text")
+            st.caption(
+                "💡 Use a exportação em HTML ao lado — tem o mesmo visual."
+            )
 
+    # --- HTML com identidade visual ----------------------------------------
+    with col2:
+        st.markdown("##### 🌐 HTML (mesmo layout do dashboard)")
+        try:
+            html = _criar_dashboard_html(df_base, os_df=os_df)
+            st.download_button(
+                "⬇️ Exportar HTML — Visual Completo",
+                data=html,
+                file_name="dashboard_suporte_n1.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+            st.caption(
+                "Abra no Chrome/Edge → **Ctrl+P** → **Salvar como PDF** "
+                "para gerar uma versão em PDF com o mesmo visual."
+            )
+        except Exception as exc:
+            st.error(f"❌ Não foi possível gerar o HTML: {exc}")
 
 # ===========================================================================
 # DASHBOARD DE O.S.
