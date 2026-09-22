@@ -9,7 +9,7 @@ Novidades desta versão:
   - Mensagem de erro cirúrgica quando falta Data, com lista de colunas.
 
 Como executar:
-    pip install streamlit pandas plotly openpyxl chardet
+    pip install streamlit pandas plotly openpyxl chardet kaleido pillow
     streamlit run dashboard_n1_telecom.py
 """
 
@@ -26,6 +26,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+try:
+    from PIL import Image
+    _TEM_PIL = True
+except ImportError:
+    _TEM_PIL = False
 
 try:
     import chardet
@@ -864,6 +870,249 @@ def build_heatmap_hora_dia(df_base):
 
 
 # ===========================================================================
+# EXPORTAÇÃO DE DASHBOARD EM IMAGEM
+# ===========================================================================
+def _fig_to_png(fig, width=1800, height=900, scale=2):
+    """Converte um gráfico Plotly em PNG para exportação em alta resolução."""
+    try:
+        return fig.to_image(format="png", width=width, height=height, scale=scale)
+    except Exception as exc:
+        raise RuntimeError(
+            "Para exportar PNG em alta qualidade, instale o pacote 'kaleido': "
+            "pip install kaleido"
+        ) from exc
+
+
+def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
+    """Monta uma imagem única, em alta resolução, com KPIs e gráficos principais."""
+    if not _TEM_PIL:
+        raise RuntimeError("Instale Pillow para gerar a imagem: pip install pillow")
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    total = len(df_base)
+    resolvidos = 0
+    cancelados = 0
+    if "Status" in df_base.columns:
+        status = df_base["Status"].astype(str).str.lower()
+        resolvidos = int(status.str.contains("resolvido|conclu|fechad|finalizad|encerrad", regex=True, na=False).sum())
+        cancelados = int(status.str.contains("cancel|ausent|desist", regex=True, na=False).sum())
+
+    os_total = len(os_df) if os_df is not None else 0
+
+    cards = [
+        ("TOTAL DE ATENDIMENTOS", f"{total:,}".replace(",", ".")),
+        ("RESOLVIDOS", f"{resolvidos:,}".replace(",", ".")),
+        ("CANCELADOS", f"{cancelados:,}".replace(",", ".")),
+        ("ABERTURAS DE O.S.", f"{os_total:,}".replace(",", ".")),
+    ]
+
+    figs = []
+    fig_volume = build_time_evolution_chart(df_base)
+    fig_volume.update_layout(title="Evolução de Volume", font=dict(size=16))
+    figs.append(("volume", fig_volume, 1800, 800))
+
+    if "Motivo" in df_base.columns:
+        mc = df_base["Motivo"].value_counts().head(12).reset_index()
+        mc.columns = ["Motivo", "Quantidade"]
+        fig_mot = px.bar(mc, x="Quantidade", y="Motivo", orientation="h",
+                         text="Quantidade", color="Quantidade",
+                         color_continuous_scale="Blues")
+        fig_mot.update_layout(
+            title="Atendimentos por Motivo", yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False, margin=dict(l=10,r=10,t=55,b=10)
+        )
+        fig_mot.update_traces(textposition="outside")
+        figs.append(("motivos", fig_mot, 1800, 900))
+
+    if os_df is not None and not os_df.empty and "Motivo" in os_df.columns:
+        oc = os_df["Motivo"].value_counts().head(12).reset_index()
+        oc.columns = ["Motivo", "Quantidade"]
+        fig_os = px.bar(oc, x="Quantidade", y="Motivo", orientation="h",
+                        text="Quantidade", color="Quantidade",
+                        color_continuous_scale="Oranges")
+        fig_os.update_layout(
+            title="Aberturas de O.S. por Motivo",
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            margin=dict(l=10,r=10,t=55,b=10)
+        )
+        fig_os.update_traces(textposition="outside")
+        figs.append(("os", fig_os, 1800, 900))
+
+    rendered = []
+    for _, fig, w, h in figs:
+        rendered.append(Image.open(io.BytesIO(_fig_to_png(fig, w, h, 2))).convert("RGB"))
+
+    margin = 60
+    card_h = 190
+    gap = 35
+    title_h = 150
+    chart_gap = 45
+    total_h = title_h + card_h + chart_gap + sum(im.height for im in rendered) + gap * (len(rendered) + 2)
+    canvas_w = max([im.width for im in rendered] + [1800]) + margin * 2
+    canvas = Image.new("RGB", (canvas_w, total_h), "white")
+    draw = ImageDraw.Draw(canvas)
+
+    try:
+        font_title = ImageFont.truetype("DejaVuSans-Bold.ttf", 54)
+        font_card = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
+        font_value = ImageFont.truetype("DejaVuSans-Bold.ttf", 48)
+        font_small = ImageFont.truetype("DejaVuSans.ttf", 22)
+    except Exception:
+        font_title = font_card = font_value = font_small = ImageFont.load_default()
+
+    y = 45
+    draw.text((margin, y), titulo, fill="#00688A", font=font_title)
+    y += title_h
+
+    card_w = (canvas_w - margin * 2 - gap * 3) // 4
+    for idx, (label, value) in enumerate(cards):
+        x = margin + idx * (card_w + gap)
+        draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=24,
+                               fill="#F5F8FA", outline="#D8E3E8", width=3)
+        draw.text((x + 25, y + 25), label, fill="#4B5B63", font=font_card)
+        draw.text((x + 25, y + 82), value, fill="#00688A", font=font_value)
+
+    y += card_h + chart_gap
+    for im in rendered:
+        x = (canvas_w - im.width) // 2
+        canvas.paste(im, (x, y))
+        y += im.height + gap
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def render_exportacao_dashboard(df_base, os_df=None):
+    st.markdown("### 🖼️ Exportação do Dashboard")
+    st.caption(
+        "Gera uma imagem única em alta resolução com o volume de atendimentos, "
+        "principais gráficos e uma área específica para as aberturas de O.S."
+    )
+    try:
+        png = _criar_dashboard_png(df_base, os_df=os_df)
+        st.download_button(
+            "⬇️ Exportar Dashboard em PNG — Alta Qualidade",
+            data=png,
+            file_name="dashboard_suporte_n1_alta_qualidade.png",
+            mime="image/png",
+            use_container_width=True,
+        )
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        st.code("pip install kaleido pillow", language="bash")
+
+
+# ===========================================================================
+# DASHBOARD EXCLUSIVO DE O.S.
+# ===========================================================================
+def render_dashboard_os(df_base):
+    """Renderiza a área exclusiva para acompanhamento de abertura de O.S."""
+    if "Motivo" not in df_base.columns:
+        st.info("Não foi encontrada a coluna Motivo/Assunto para montar o painel de O.S.")
+        return
+
+    motivo = df_base["Motivo"].astype(str)
+    mascara_os = motivo.str.contains(
+        r"\bO\.?\s*S\.?\b|ordem\s+de\s+servi|link\s*loss|abertura\s+de\s+os",
+        case=False, regex=True, na=False
+    )
+    os_df = df_base.loc[mascara_os].copy()
+
+    total_os = len(os_df)
+    total_geral = len(df_base)
+    pct_os = (total_os / total_geral * 100) if total_geral else 0.0
+
+    st.markdown("### 🛠️ Dashboard de Abertura de O.S.")
+    st.caption(
+        "Área reservada para acompanhar exclusivamente os atendimentos relacionados "
+        "à abertura, informação ou tratamento de Ordem de Serviço."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🧾 O.S. identificadas", f"{total_os:,}".replace(",", "."))
+    c2.metric("% dos atendimentos", f"{pct_os:.1f}%")
+    if not os_df.empty and "Analista" in os_df.columns:
+        c3.metric("👤 Analistas envolvidos", f"{os_df['Analista'].nunique():,}".replace(",", "."))
+    else:
+        c3.metric("👤 Analistas envolvidos", "-")
+
+    if os_df.empty:
+        st.info("Nenhum atendimento classificado como O.S. foi encontrado no período selecionado.")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        oc = os_df["Motivo"].value_counts().head(15).reset_index()
+        oc.columns = ["Motivo", "Quantidade"]
+        fig = px.bar(oc, x="Quantidade", y="Motivo", orientation="h",
+                     text="Quantidade", color="Quantidade",
+                     color_continuous_scale="Oranges")
+        fig.update_layout(
+            title="Tipos de O.S.",
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False, coloraxis_showscale=False,
+            margin=dict(l=10, r=10, t=55, b=10), height=500
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        if "Analista" in os_df.columns:
+            ac = os_df["Analista"].value_counts().head(15).reset_index()
+            ac.columns = ["Analista", "Quantidade"]
+            fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
+                         text="Quantidade", color="Quantidade",
+                         color_continuous_scale="Oranges")
+            fig.update_layout(
+                title="O.S. por Analista",
+                yaxis={"categoryorder": "total ascending"},
+                showlegend=False, coloraxis_showscale=False,
+                margin=dict(l=10, r=10, t=55, b=10), height=500
+            )
+            fig.update_traces(textposition="outside")
+            st.plotly_chart(fig, use_container_width=True)
+
+    if "Status" in os_df.columns:
+        st.markdown("#### 📌 Status das O.S.")
+        sc = os_df["Status"].value_counts().reset_index()
+        sc.columns = ["Status", "Quantidade"]
+        fig = px.pie(sc, names="Status", values="Quantidade", hole=0.5)
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=420)
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        st.plotly_chart(fig, use_container_width=True)
+
+    if "Data" in os_df.columns:
+        st.markdown("#### 📈 Evolução das Aberturas de O.S.")
+        os_time = os_df.copy()
+        os_time["Dia"] = os_time["Data"].dt.normalize()
+        serie = os_time.groupby("Dia").size().reset_index(name="O.S.")
+        fig = px.bar(serie, x="Dia", y="O.S.", text="O.S.")
+        fig.update_layout(
+            xaxis_title="Data", yaxis_title="Quantidade de O.S.",
+            margin=dict(l=10, r=10, t=30, b=10), height=420
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### 🗂️ Registros relacionados a O.S.")
+    st.dataframe(
+        os_df.sort_values("Data", ascending=False) if "Data" in os_df.columns else os_df,
+        use_container_width=True, hide_index=True
+    )
+
+    csv_os = os_df.to_csv(index=False, sep=";").encode("utf-8-sig")
+    st.download_button(
+        "⬇️ Exportar dados de O.S. (CSV)",
+        data=csv_os,
+        file_name="abertura_os_n1.csv",
+        mime="text/csv",
+    )
+
+
+# ===========================================================================
 # RENDERIZAÇÃO — MODO AGREGADO (Tag, Quantidade, %)
 # ===========================================================================
 def render_modo_agregado(df: pd.DataFrame, agregados: dict):
@@ -980,6 +1229,9 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
     st.markdown("---")
     st.markdown("### 🗂️ Tabela completa (com classificação N1/N2)")
     st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    render_exportacao_dashboard(df_view.rename(columns={col_tag: "Motivo"}), os_df=None)
 
     csv_export = df_view.to_csv(index=False, sep=";").encode("utf-8-sig")
     st.download_button(
@@ -1305,6 +1557,21 @@ st.caption(
     "faixa horária e dia da semana."
 )
 st.plotly_chart(build_heatmap_hora_dia(df), use_container_width=True)
+
+
+# ===========================================================================
+# ÁREA RESERVADA PARA ABERTURA DE O.S.
+# ===========================================================================
+render_dashboard_os(df)
+
+
+st.markdown("---")
+render_exportacao_dashboard(df, os_df=df.loc[
+    df["Motivo"].astype(str).str.contains(
+        r"\\bO\\.?\\s*S\\.?\\b|ordem\\s+de\\s+servi|link\\s*loss|abertura\\s+de\\s+os",
+        case=False, regex=True, na=False
+    )
+].copy() if "Motivo" in df.columns else None)
 
 
 if "Analista" in df.columns and "Status" in df.columns:
