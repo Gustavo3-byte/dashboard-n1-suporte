@@ -479,6 +479,56 @@ def _normalizar(texto) -> str:
     return texto
 
 
+# ===========================================================================
+# CLASSIFICAÇÃO N1 (SUPORTE REMOTO) x N2 (CAMPO)
+# ===========================================================================
+# Padrões de tags/motivos que tipicamente são atividade de campo (N2), e não
+# de suporte remoto (N1). A lista pode ser ajustada pelo supervisor na tela.
+N2_PADROES_DEFAULT = [
+    r"provision",
+    r"bater.*cto",
+    r"\bcto\b",
+]
+
+
+def eh_provavel_n2(valor) -> bool:
+    """Verifica se um Motivo/Tag provavelmente é atividade de N2 (campo)."""
+    texto_norm = _normalizar(valor)
+    return any(re.search(padrao, texto_norm) for padrao in N2_PADROES_DEFAULT)
+
+
+def sugerir_tags_n2(valores) -> list:
+    """Dentre os valores únicos informados, retorna os que parecem ser N2."""
+    vistos = []
+    for v in valores:
+        if v not in vistos and eh_provavel_n2(v):
+            vistos.append(v)
+    return vistos
+
+
+def selecionar_tags_n2(tags_unicas, chave_widget, local=st.sidebar):
+    """
+    Renderiza (na sidebar por padrão) o controle para o supervisor ajustar
+    quais tags/motivos são N2 (campo). Pré-marca as que batem com os
+    padrões conhecidos (Provisionamento, Bater CTO...).
+    """
+    sugestao = sugerir_tags_n2(tags_unicas)
+    with local.expander("🛠️ Quais tags são N2 (Campo)?", expanded=False):
+        st.caption(
+            "Provisionamento, Bater CTO e outras tarefas de campo entram "
+            "aqui. Ajuste a lista se necessário — o restante é tratado "
+            "como N1 (suporte remoto)."
+        )
+        selecionadas = st.multiselect(
+            "Tags/Motivos de N2",
+            options=tags_unicas,
+            default=sugestao,
+            key=chave_widget,
+            label_visibility="collapsed",
+        )
+    return selecionadas
+
+
 def detectar_colunas(df: pd.DataFrame) -> dict:
     mapa = {}
     colunas_norm = {col: _normalizar(col) for col in df.columns}
@@ -826,53 +876,91 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
 
     col_tag = agregados["tag"]
     col_qtd = agregados["qtd"]
-    col_pct = agregados["pct"]
 
     df_view = df.copy()
     df_view[col_qtd] = pd.to_numeric(df_view[col_qtd], errors="coerce")
-    df_view = df_view.dropna(subset=[col_qtd]).sort_values(col_qtd,
-                                                          ascending=False)
+    df_view = df_view.dropna(subset=[col_qtd]).sort_values(col_qtd, ascending=False)
+
+    # --- Classificação N1 x N2, ajustável pelo supervisor -----------------
+    tags_unicas = df_view[col_tag].dropna().astype(str).unique().tolist()
+    tags_n2 = selecionar_tags_n2(tags_unicas, chave_widget="tags_n2_agregado")
+    df_view["Nível"] = df_view[col_tag].apply(
+        lambda t: "N2 (Campo)" if t in tags_n2 else "N1 (Remoto)"
+    )
+
+    df_n1 = df_view[df_view["Nível"] == "N1 (Remoto)"]
+    df_n2 = df_view[df_view["Nível"] == "N2 (Campo)"]
 
     total = int(df_view[col_qtd].sum())
-    n_tags = int(df_view[col_tag].nunique())
+    total_n1 = int(df_n1[col_qtd].sum())
+    total_n2 = int(df_n2[col_qtd].sum())
+    pct_n2 = (total_n2 / total * 100) if total else 0.0
     top_tag = df_view.iloc[0][col_tag] if len(df_view) else "-"
-    top_qtd = int(df_view.iloc[0][col_qtd]) if len(df_view) else 0
 
+    # --- KPIs gerais --------------------------------------------------------
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📦 Total", f"{total:,}".replace(",", "."))
-    c2.metric("🏷️ Tags distintas", f"{n_tags}")
-    c3.metric("🥇 Tag líder", str(top_tag)[:30])
-    c4.metric("🔢 Volume da líder", f"{top_qtd:,}".replace(",", "."))
+    c1.metric("📦 Total Geral", f"{total:,}".replace(",", "."))
+    c2.metric("🧑‍💻 Total N1 (Remoto)", f"{total_n1:,}".replace(",", "."))
+    c3.metric("🛠️ Total N2 (Campo)", f"{total_n2:,}".replace(",", "."))
+    c4.metric("📊 % N2 do Total", f"{pct_n2:.1f}%")
+    st.caption(f"🥇 Tag líder geral: **{top_tag}**")
 
     st.markdown("---")
 
-    col_b, col_p = st.columns([2, 1])
+    def _bloco_tag(df_nivel, titulo, cor_escala):
+        """Renderiza o bloco padrão (barras + pizza + tabela) para um recorte."""
+        if df_nivel.empty:
+            st.info(f"Nenhuma tag classificada como {titulo} neste arquivo.")
+            return
 
-    with col_b:
-        st.markdown("#### 🏷️ Distribuição por Tag")
-        top_n = df_view.head(20)
-        fig = px.bar(
-            top_n, x=col_qtd, y=col_tag, orientation="h",
-            text=col_qtd, color=col_qtd, color_continuous_scale="Blues",
+        col_b, col_p = st.columns([2, 1])
+        with col_b:
+            st.markdown(f"#### 🏷️ Distribuição — {titulo}")
+            top_n = df_nivel.head(20)
+            fig = px.bar(
+                top_n, x=col_qtd, y=col_tag, orientation="h",
+                text=col_qtd, color=col_qtd, color_continuous_scale=cor_escala,
+            )
+            fig.update_layout(
+                yaxis={"categoryorder": "total ascending"},
+                showlegend=False, coloraxis_showscale=False,
+                xaxis_title="Quantidade", yaxis_title="",
+                margin=dict(l=10, r=10, t=30, b=10),
+                height=480,
+            )
+            fig.update_traces(textposition="outside")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col_p:
+            st.markdown("#### 🥧 Top 10 (proporção)")
+            top10 = df_nivel.head(10)
+            fig = px.pie(top10, names=col_tag, values=col_qtd, hole=0.5)
+            fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=480)
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.dataframe(
+            df_nivel[[col_tag, col_qtd]].rename(
+                columns={col_tag: "Tag", col_qtd: "Quantidade"}
+            ),
+            use_container_width=True,
+            hide_index=True,
         )
-        fig.update_layout(
-            yaxis={"categoryorder": "total ascending"},
-            showlegend=False, coloraxis_showscale=False,
-            xaxis_title="Quantidade", yaxis_title="",
-            margin=dict(l=10, r=10, t=30, b=10),
-            height=520,
-        )
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
 
-    with col_p:
-        st.markdown("#### 🥧 Top 10 (proporção)")
-        top10 = df_view.head(10)
-        fig = px.pie(top10, names=col_tag, values=col_qtd, hole=0.5)
-        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=520)
-        st.plotly_chart(fig, use_container_width=True)
+    aba_geral, aba_n1, aba_n2 = st.tabs(
+        ["📊 Visão Geral", "🧑‍💻 N1 - Suporte Remoto", "🛠️ N2 - Campo"]
+    )
 
-    st.markdown("### 🗂️ Tabela completa")
+    with aba_geral:
+        _bloco_tag(df_view, "Todas as Tags", "Blues")
+
+    with aba_n1:
+        _bloco_tag(df_n1, "N1 (Suporte Remoto)", "Blues")
+
+    with aba_n2:
+        _bloco_tag(df_n2, "N2 (Campo)", "Oranges")
+
+    st.markdown("---")
+    st.markdown("### 🗂️ Tabela completa (com classificação N1/N2)")
     st.dataframe(df_view, use_container_width=True, hide_index=True)
 
     csv_export = df_view.to_csv(index=False, sep=";").encode("utf-8-sig")
@@ -1085,16 +1173,36 @@ st.markdown("---")
 # ===========================================================================
 # GRÁFICOS (base detalhada)
 # ===========================================================================
-col_g1, col_g2 = st.columns(2)
+if "Motivo" in df.columns:
+    st.markdown("### 🔎 Distribuição por Motivo (N1 x N2)")
 
-with col_g1:
-    if "Motivo" in df.columns:
-        st.markdown("#### 🔎 Top Assuntos / Motivos")
-        mc = df["Motivo"].value_counts().head(15).reset_index()
+    motivos_unicos = df["Motivo"].dropna().astype(str).unique().tolist()
+    tags_n2_detalhado = selecionar_tags_n2(
+        motivos_unicos, chave_widget="tags_n2_detalhado"
+    )
+    df["Nível_Suporte"] = df["Motivo"].apply(
+        lambda m: "N2 (Campo)" if m in tags_n2_detalhado else "N1 (Remoto)"
+    )
+
+    total_geral = len(df)
+    total_n1_det = int((df["Nível_Suporte"] == "N1 (Remoto)").sum())
+    total_n2_det = int((df["Nível_Suporte"] == "N2 (Campo)").sum())
+    pct_n2_det = (total_n2_det / total_geral * 100) if total_geral else 0.0
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🧑‍💻 Chamados N1 (Remoto)", f"{total_n1_det:,}".replace(",", "."))
+    m2.metric("🛠️ Chamados N2 (Campo)", f"{total_n2_det:,}".replace(",", "."))
+    m3.metric("📊 % N2 do Total", f"{pct_n2_det:.1f}%")
+
+    def _grafico_motivo(df_nivel, cor_escala):
+        if df_nivel.empty:
+            st.info("Nenhum chamado nesta categoria no período.")
+            return
+        mc = df_nivel["Motivo"].value_counts().head(15).reset_index()
         mc.columns = ["Motivo", "Quantidade"]
         fig = px.bar(mc, x="Quantidade", y="Motivo", orientation="h",
                      text="Quantidade", color="Quantidade",
-                     color_continuous_scale="Blues")
+                     color_continuous_scale=cor_escala)
         fig.update_layout(
             yaxis={"categoryorder": "total ascending"},
             showlegend=False, coloraxis_showscale=False,
@@ -1103,17 +1211,29 @@ with col_g1:
         )
         fig.update_traces(textposition="outside")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("ℹ️ Sem coluna de Motivo/Assunto.")
 
-with col_g2:
+    aba_geral_m, aba_n1_m, aba_n2_m = st.tabs(
+        ["📊 Todos os Motivos", "🧑‍💻 N1 - Suporte Remoto", "🛠️ N2 - Campo"]
+    )
+    with aba_geral_m:
+        _grafico_motivo(df, "Blues")
+    with aba_n1_m:
+        _grafico_motivo(df[df["Nível_Suporte"] == "N1 (Remoto)"], "Blues")
+    with aba_n2_m:
+        _grafico_motivo(df[df["Nível_Suporte"] == "N2 (Campo)"], "Oranges")
+
+    st.markdown("---")
+else:
+    st.info("ℹ️ Sem coluna de Motivo/Assunto.")
+
+
+col_g1, col_g2 = st.columns(2)
+
+with col_g1:
     st.markdown("#### 📈 Evolução de Volume na Base")
     st.plotly_chart(build_time_evolution_chart(df), use_container_width=True)
 
-
-col_g3, col_g4 = st.columns(2)
-
-with col_g3:
+with col_g2:
     if "Status" in df.columns:
         st.markdown("#### 📌 Distribuição por Status")
         sc = df["Status"].value_counts().reset_index()
@@ -1125,22 +1245,22 @@ with col_g3:
         fig.update_layout(margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-with col_g4:
-    if "Analista" in df.columns:
-        st.markdown("#### 🧑‍💻 Top Analistas por Volume")
-        ac = df["Analista"].value_counts().head(15).reset_index()
-        ac.columns = ["Analista", "Quantidade"]
-        fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
-                     text="Quantidade", color="Quantidade",
-                     color_continuous_scale="Teal")
-        fig.update_layout(
-            yaxis={"categoryorder": "total ascending"},
-            showlegend=False, coloraxis_showscale=False,
-            xaxis_title="Nº de Chamados", yaxis_title="",
-            margin=dict(l=10, r=10, t=30, b=10),
-        )
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(fig, use_container_width=True)
+
+if "Analista" in df.columns:
+    st.markdown("#### 🧑‍💻 Top Analistas por Volume")
+    ac = df["Analista"].value_counts().head(15).reset_index()
+    ac.columns = ["Analista", "Quantidade"]
+    fig = px.bar(ac, x="Quantidade", y="Analista", orientation="h",
+                 text="Quantidade", color="Quantidade",
+                 color_continuous_scale="Teal")
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+        showlegend=False, coloraxis_showscale=False,
+        xaxis_title="Nº de Chamados", yaxis_title="",
+        margin=dict(l=10, r=10, t=30, b=10),
+    )
+    fig.update_traces(textposition="outside")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 st.markdown("#### 🔥 Heatmap de Volume — Hora × Dia da Semana")
