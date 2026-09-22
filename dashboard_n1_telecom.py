@@ -1444,7 +1444,7 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
 
         col_b, col_p = st.columns([2, 1])
         with col_b:
-            st.markdown(f"#### 🏷️ Top 20 — {titulo}")
+            st.markdown
             top_n = df_nivel.head(20)
             fig = px.bar(
                 top_n, x=col_qtd, y=col_tag, orientation="h",
