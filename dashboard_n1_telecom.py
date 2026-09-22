@@ -935,7 +935,25 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
             st.markdown("#### 🥧 Top 10 (proporção)")
             top10 = df_nivel.head(10)
             fig = px.pie(top10, names=col_tag, values=col_qtd, hole=0.5)
-            fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=480)
+            fig.update_traces(
+                textposition="inside",
+                textinfo="percent",
+                insidetextfont=dict(size=11),
+            )
+            fig.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=520,
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.05,
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=10),
+                ),
+                uniformtext_minsize=8,
+                uniformtext_mode="hide",
+            )
             st.plotly_chart(fig, use_container_width=True)
 
         st.dataframe(
@@ -1242,7 +1260,25 @@ with col_g2:
             sc, names="Status", values="Quantidade", hole=0.5,
             color_discrete_sequence=[AZUL_MARCA, TEAL_LOGO, LARANJA_LOGO, ROSA_LOGO],
         )
-        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10))
+        fig.update_traces(
+            textposition="inside",
+            textinfo="percent",
+            insidetextfont=dict(size=11),
+        )
+        fig.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=420,
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.05,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=10),
+            ),
+            uniformtext_minsize=8,
+            uniformtext_mode="hide",
+        )
         st.plotly_chart(fig, use_container_width=True)
 
 
