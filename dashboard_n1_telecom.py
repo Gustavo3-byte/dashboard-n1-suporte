@@ -1,12 +1,11 @@
 """
-Dashboard de Suporte N1 - Telecom (v6.3 - Final)
-================================================
-Correções desta versão:
-  - _fig_to_png() agora reporta a causa REAL do erro (não só "instale kaleido").
-  - render_exportacao_dashboard() cai automaticamente para HTML quando o PNG falha.
-  - Nova _criar_dashboard_html() como fallback que só depende do plotly.
-  - Base64 do logo/mascote movidos para constantes no topo — se vazias,
-    o código segue funcionando (só não mostra a imagem).
+Dashboard de Suporte N1 - Telecom (v7)
+======================================
+- Modo detalhado (com coluna Data) OU modo agregado (Tag;Quantidade;%).
+- Modo agregado com split N1 (Suporte Remoto) x N2 (Campo).
+- Filtro automático de tags vazias / "nan" / "none" / "-" / "n/a".
+- Exportação HTML no modo agregado: banner, KPIs, Top 20 barras N1 x N2,
+  Top 10 pizza, tabelas completas N1/N2.
 
 Como executar:
     pip install -r requirements.txt
@@ -52,7 +51,6 @@ st.set_page_config(
 ARQUIVO_AUTO = "dados_n1_auto.csv"
 
 
-# ===========================================================================
 # ===========================================================================
 # IDENTIDADE VISUAL DA MARCA (VaraNet)
 # ===========================================================================
@@ -179,9 +177,8 @@ def render_mascote_sidebar(mensagem="Time N1 mandando bem! 🎉"):
 aplicar_estilo_marca()
 
 
-
 # ===========================================================================
-# LEITOR UNIVERSAL (embutido)
+# LEITOR UNIVERSAL
 # ===========================================================================
 ENCODINGS = ["utf-8-sig", "utf-8", "latin-1", "cp1252", "utf-16", "ascii"]
 SEPARADORES = [";", ",", "\t", "|", ":"]
@@ -276,6 +273,7 @@ def _ler_csv(raw: bytes) -> pd.DataFrame:
         io.BytesIO(raw), sep=sep, encoding=enc, header=None,
         dtype=str, keep_default_na=False, na_values=[""],
         engine="python", on_bad_lines="skip",
+        skip_blank_lines=True,
     )
     if df_bruto.empty:
         return df_bruto
@@ -285,6 +283,7 @@ def _ler_csv(raw: bytes) -> pd.DataFrame:
         io.BytesIO(raw), sep=sep, encoding=enc, header=idx_cab,
         dtype=str, keep_default_na=False, na_values=[""],
         engine="python", on_bad_lines="skip",
+        skip_blank_lines=True,
     )
     df = df.loc[:, ~df.columns.astype(str).str.match(r"^Unnamed")]
     df.columns = [str(c).strip() for c in df.columns]
@@ -430,7 +429,7 @@ CAMPOS_AGREGADOS_PCT = ("%", "percentual", "porcentagem", "pct",
 
 
 # ===========================================================================
-# NORMALIZAÇÃO E DETECÇÃO
+# NORMALIZAÇÃO
 # ===========================================================================
 def _normalizar(texto) -> str:
     if texto is None:
@@ -544,7 +543,7 @@ def load_data(caminho_ou_arquivo, origem, mtime, tamanho):
 
 
 # ===========================================================================
-# HELPERS DE NORMALIZAÇÃO
+# HELPERS
 # ===========================================================================
 def _normalizar_motivo(s: pd.Series) -> pd.Series:
     s = (s.astype(str)
@@ -627,7 +626,7 @@ def _converter_tempo_flexivel(serie: pd.Series) -> pd.Series:
 
 
 # ===========================================================================
-# PREPARAÇÃO DOS DADOS
+# PREPARAÇÃO DOS DADOS (modo detalhado)
 # ===========================================================================
 def preparar_dados(df_raw: pd.DataFrame, mapa: dict) -> pd.DataFrame:
     df = df_raw.copy()
@@ -805,13 +804,9 @@ def build_heatmap_hora_dia(df_base):
 
 
 # ===========================================================================
-# EXPORTAÇÃO DE DASHBOARD EM IMAGEM / HTML
+# EXPORTAÇÃO — MODO DETALHADO (Data)
 # ===========================================================================
 def _fig_to_png(fig, width=1800, height=900, scale=2):
-    """
-    Converte um gráfico Plotly em PNG. Se kaleido não estiver disponível
-    ou falhar, levanta RuntimeError com a causa real.
-    """
     try:
         import kaleido  # noqa: F401
     except ImportError as exc:
@@ -820,34 +815,22 @@ def _fig_to_png(fig, width=1800, height=900, scale=2):
             "Adicione `kaleido==0.2.1` ao requirements.txt e faça o "
             "deploy novamente."
         ) from exc
-
     try:
         return fig.to_image(format="png", width=width,
                             height=height, scale=scale)
     except Exception as exc:
         raise RuntimeError(
             f"Falha ao exportar PNG via kaleido: "
-            f"{type(exc).__name__}: {exc}. "
-            "Verifique se `kaleido==0.2.1` está no requirements.txt. "
-            "Se o problema persistir, use o botão 'Exportar em HTML' abaixo."
+            f"{type(exc).__name__}: {exc}."
         ) from exc
 
 
 def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
-    """Monta uma imagem única, em alta resolução, com KPIs e gráficos."""
     if not _TEM_PIL:
-        raise RuntimeError(
-            "Instale Pillow para gerar a imagem: pip install pillow"
-        )
-
+        raise RuntimeError("Instale Pillow: pip install pillow")
     from PIL import Image, ImageDraw, ImageFont
 
-    if "Data" not in df_base.columns and "Quantidade" in df_base.columns:
-        total = int(pd.to_numeric(df_base["Quantidade"],
-                                  errors="coerce").fillna(0).sum())
-    else:
-        total = len(df_base)
-
+    total = len(df_base)
     resolvidos = cancelados = 0
     if "Status" in df_base.columns:
         status = df_base["Status"].astype(str).str.lower()
@@ -858,7 +841,6 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
             "cancel|ausent|desist", regex=True, na=False).sum())
 
     os_total = len(os_df) if os_df is not None else 0
-
     cards = [
         ("TOTAL DE ATENDIMENTOS", f"{total:,}".replace(",", ".")),
         ("RESOLVIDOS", f"{resolvidos:,}".replace(",", ".")),
@@ -870,7 +852,7 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
     if "Data" in df_base.columns:
         fig_volume = build_time_evolution_chart(df_base)
         fig_volume.update_layout(title="Evolução de Volume", font=dict(size=16))
-        figs.append(("volume", fig_volume, 1800, 800))
+        figs.append((fig_volume, 1800, 800))
 
     if "Motivo" in df_base.columns:
         mc = df_base["Motivo"].value_counts().head(12).reset_index()
@@ -880,30 +862,15 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
                          color_continuous_scale="Blues")
         fig_mot.update_layout(
             title="Atendimentos por Motivo",
-            yaxis={"categoryorder": "total ascending"},
+            yaxis={"categoryorder": "total ascending", "automargin": True},
             showlegend=False, coloraxis_showscale=False,
-            margin=dict(l=10, r=10, t=55, b=10),
+            margin=dict(l=20, r=80, t=55, b=10),
         )
-        fig_mot.update_traces(textposition="outside")
-        figs.append(("motivos", fig_mot, 1800, 900))
-
-    if os_df is not None and not os_df.empty and "Motivo" in os_df.columns:
-        oc = os_df["Motivo"].value_counts().head(12).reset_index()
-        oc.columns = ["Motivo", "Quantidade"]
-        fig_os = px.bar(oc, x="Quantidade", y="Motivo", orientation="h",
-                        text="Quantidade", color="Quantidade",
-                        color_continuous_scale="Oranges")
-        fig_os.update_layout(
-            title="Aberturas de O.S. por Motivo",
-            yaxis={"categoryorder": "total ascending"},
-            showlegend=False, coloraxis_showscale=False,
-            margin=dict(l=10, r=10, t=55, b=10),
-        )
-        fig_os.update_traces(textposition="outside")
-        figs.append(("os", fig_os, 1800, 900))
+        fig_mot.update_traces(textposition="outside", cliponaxis=False)
+        figs.append((fig_mot, 1800, 900))
 
     rendered = []
-    for _, fig, w, h in figs:
+    for fig, w, h in figs:
         rendered.append(
             Image.open(io.BytesIO(_fig_to_png(fig, w, h, 2))).convert("RGB")
         )
@@ -949,86 +916,125 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
     return out.getvalue()
 
 
-def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
+def render_exportacao_dashboard(df_base, os_df=None):
+    st.markdown("### 🖼️ Exportação do Dashboard")
+    st.caption(
+        "Gera uma imagem única em alta resolução com o volume de "
+        "atendimentos e principais gráficos."
+    )
+    try:
+        png = _criar_dashboard_png(df_base, os_df=os_df)
+        st.download_button(
+            "⬇️ Exportar Dashboard em PNG — Alta Qualidade",
+            data=png,
+            file_name="dashboard_suporte_n1_alta_qualidade.png",
+            mime="image/png",
+            use_container_width=True,
+        )
+    except RuntimeError as exc:
+        st.warning(
+            "⚠️ Não foi possível gerar o PNG. Para exportar o dashboard "
+            "em HTML, use o botão abaixo da seção de tags."
+        )
+        with st.expander("Ver motivo técnico"):
+            st.code(str(exc), language="text")
+
+
+# ===========================================================================
+# EXPORTAÇÃO — MODO AGREGADO (Tag/Quantidade) COM SPLIT N1 x N2
+# ===========================================================================
+def _criar_dashboard_html_tags(df_view, col_tag, col_qtd,
                                 titulo="Resumo por Tag - Suporte N1"):
     """
-    Gera um HTML enxuto, focado apenas em TAGS + quantidades.
-    Ideal para exports agregados (Tag;Quantidade;%).
-    Sem agentes, sem status, sem taxas.
+    Gera um HTML focado em TAGS + quantidades, com split N1 x N2.
+    Espera que df_view já tenha a coluna 'Nível' preenchida.
+    Top 20 barras em cada nível + Top 10 pizza + tabelas completas.
     """
     import plotly.io as pio
 
-    df_view = df_tags.copy()
+    # ---------------------------------------------------- Limpeza
+    df_view = df_view.copy()
     df_view[col_qtd] = pd.to_numeric(df_view[col_qtd], errors="coerce")
+    df_view[col_tag] = df_view[col_tag].astype(str).str.strip()
+    df_view = df_view[
+        ~df_view[col_tag].str.lower().isin(
+            ["", "nan", "none", "null", "-", "n/a", "na"]
+        )
+    ]
     df_view = (df_view.dropna(subset=[col_qtd])
                       .sort_values(col_qtd, ascending=False)
                       .reset_index(drop=True))
 
+    # ---------------------------------------------------- Split N1 x N2
+    if "Nível" in df_view.columns:
+        df_n1 = df_view[df_view["Nível"] == "N1 (Remoto)"].copy()
+        df_n2 = df_view[df_view["Nível"] == "N2 (Campo)"].copy()
+    else:
+        df_n1 = df_view.copy()
+        df_n2 = df_view.iloc[0:0].copy()
+
     total = int(df_view[col_qtd].sum())
+    total_n1 = int(df_n1[col_qtd].sum()) if len(df_n1) else 0
+    total_n2 = int(df_n2[col_qtd].sum()) if len(df_n2) else 0
+    pct_n2 = (total_n2 / total * 100) if total else 0.0
     n_tags = int(df_view[col_tag].nunique())
     top_tag = str(df_view.iloc[0][col_tag]) if len(df_view) else "-"
-    top_qtd = int(df_view.iloc[0][col_qtd]) if len(df_view) else 0
 
-    # --- Barras (top 20) com margem esquerda larga para não cortar --------
-    top_n = df_view.head(20)
-    fig_bar = px.bar(
-        top_n, x=col_qtd, y=col_tag, orientation="h",
-        text=col_qtd, color=col_qtd,
-        color_continuous_scale=[[0, "#E6F2F6"], [1, AZUL_MARCA]],
-    )
-    fig_bar.update_layout(
-        title="Top 20 Tags por Volume",
-        height=max(520, len(top_n) * 36 + 160),
-        yaxis={"categoryorder": "total ascending",
-               "automargin": True, "title": ""},
-        xaxis={"title": "Quantidade", "automargin": True},
-        showlegend=False, coloraxis_showscale=False,
-        plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(l=20, r=80, t=80, b=60),
-        font=dict(size=13, color="#4B5B63"),
-        title_font=dict(size=18, color=AZUL_MARCA),
-    )
-    fig_bar.update_traces(
-        textposition="outside",
-        textfont=dict(color=AZUL_MARCA, size=12),
-        cliponaxis=False,
-    )
-    bar_html = pio.to_html(fig_bar, include_plotlyjs=False, full_html=False)
+    # ---------------------------------------------------- Helper gráficos
+    def _fig_bar(df_nivel, titulo_b, cor_escala, cor_texto):
+        top = df_nivel.head(20)
+        if top.empty:
+            return None
+        fig = px.bar(
+            top, x=col_qtd, y=col_tag, orientation="h",
+            text=col_qtd, color=col_qtd,
+            color_continuous_scale=cor_escala,
+        )
+        fig.update_layout(
+            title=titulo_b,
+            height=max(520, len(top) * 38 + 160),
+            yaxis={"categoryorder": "total ascending",
+                   "automargin": True, "title": ""},
+            xaxis={"title": "Quantidade", "automargin": True},
+            showlegend=False, coloraxis_showscale=False,
+            plot_bgcolor="white", paper_bgcolor="white",
+            margin=dict(l=20, r=80, t=80, b=60),
+            font=dict(size=13, color="#4B5B63"),
+            title_font=dict(size=18, color=cor_texto),
+        )
+        fig.update_traces(
+            textposition="outside",
+            textfont=dict(color=cor_texto, size=12),
+            cliponaxis=False,
+        )
+        return pio.to_html(fig, include_plotlyjs=False, full_html=False)
 
-    # --- Pizza (top 10) ---------------------------------------------------
-    top10 = df_view.head(10)
-    fig_pie = px.pie(
-        top10, names=col_tag, values=col_qtd, hole=0.5,
-        color_discrete_sequence=[
-            AZUL_MARCA, TEAL_LOGO, LARANJA_LOGO, ROSA_LOGO,
-            AZUL_MARCA_CLARO, "#4DB6D6", "#7FCBDD",
-            "#A8DDE6", "#CBE8EE", "#E6F2F6",
-        ],
-    )
-    fig_pie.update_traces(
-        textposition="inside", textinfo="percent",
-        insidetextfont=dict(size=12, color="white"),
-    )
-    fig_pie.update_layout(
-        title="Top 10 Tags (proporção)",
-        height=max(520, len(top_n) * 36 + 160),
-        margin=dict(l=20, r=20, t=80, b=40),
-        font=dict(size=12, color="#4B5B63"),
-        title_font=dict(size=18, color=AZUL_MARCA),
-        legend=dict(orientation="h", yanchor="top", y=-0.05,
-                    xanchor="center", x=0.5, font=dict(size=11)),
-        uniformtext_minsize=10, uniformtext_mode="hide",
-    )
-    pie_html = pio.to_html(fig_pie, include_plotlyjs=False, full_html=False)
+    bar_n1 = _fig_bar(df_n1, "🧑‍💻 N1 — Top 20 Tags",
+                      [[0, "#E6F2F6"], [1, AZUL_MARCA]], AZUL_MARCA)
+    bar_n2 = _fig_bar(df_n2, "🛠️ N2 — Top 20 Tags",
+                      [[0, "#FBEBDD"], [1, LARANJA_LOGO]], LARANJA_LOGO)
 
-    # --- Tabela completa --------------------------------------------------
-    linhas = ""
-    for _, row in df_view.iterrows():
-        tag = str(row[col_tag])
-        qtd = int(row[col_qtd])
-        linhas += (f"<tr><td>{tag}</td>"
-                   f"<td style='text-align:right'>{qtd:,}</td></tr>")
+    # ---------------------------------------------------- Tabelas
+    def _tabela_html(df_nivel, classe_extra=""):
+        if df_nivel.empty:
+            return '<p style="color:#4B5B63;">Nenhuma tag nesta categoria.</p>'
+        linhas = ""
+        for _, row in df_nivel.iterrows():
+            tag = str(row[col_tag])
+            qtd = int(row[col_qtd])
+            linhas += (f"<tr><td>{tag}</td>"
+                       f"<td style='text-align:right'>{qtd:,}</td></tr>")
+        return (
+            f'<table class="tabela {classe_extra}">'
+            '<thead><tr><th>Tag</th>'
+            '<th style="text-align:right">Quantidade</th></tr></thead>'
+            f'<tbody>{linhas}</tbody></table>'
+        )
 
+    tabela_n1 = _tabela_html(df_n1)
+    tabela_n2 = _tabela_html(df_n2, "n2")
+
+    # ---------------------------------------------------- Logo/mascote
     logo_html = (
         f'<img src="data:image/png;base64,{LOGO_BASE64}" alt="Logo" '
         f'class="banner-logo" />' if LOGO_BASE64 else ""
@@ -1040,6 +1046,7 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
         f'</div>' if MASCOTE_BASE64 else ""
     )
 
+    # ---------------------------------------------------- HTML final
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -1091,6 +1098,8 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
     font-weight: 700; line-height: 1.15;
     word-break: break-word;
   }}
+  .kpi-card.n2 {{ border-top-color: {LARANJA_LOGO}; }}
+  .kpi-card.n2 .kpi-value {{ color: {LARANJA_LOGO}; }}
   .bloco {{
     background: #FFFFFF; border-radius: 12px;
     padding: 16px 20px 12px 20px; margin-bottom: 22px;
@@ -1102,10 +1111,10 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
     border-bottom: 2px solid rgba(0,104,138,0.10);
   }}
   .grid2 {{
-    display: grid; grid-template-columns: 2fr 1fr;
+    display: grid; grid-template-columns: 1fr 1fr;
     gap: 22px; margin-bottom: 22px;
   }}
-  @media (max-width: 900px) {{
+  @media (max-width: 1000px) {{
     .grid2 {{ grid-template-columns: 1fr; }}
   }}
   .tabela {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
@@ -1113,6 +1122,7 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
     background: {AZUL_MARCA}; color: white;
     padding: 10px 12px; text-align: left; font-weight: 600;
   }}
+  .tabela.n2 th {{ background: {LARANJA_LOGO}; }}
   .tabela td {{
     padding: 8px 12px; border-bottom: 1px solid #E8EEF1;
   }}
@@ -1142,7 +1152,7 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
     {logo_html}
     <div class="banner-textos">
       <h1>🏷️ {titulo}</h1>
-      <p>Distribuição de atendimentos por tag</p>
+      <p>Distribuição de atendimentos por tag · N1 x N2</p>
     </div>
   </div>
 
@@ -1156,40 +1166,33 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
       <div class="kpi-value">{n_tags}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">🥇 TAG LÍDER</div>
-      <div class="kpi-value" style="font-size:18px;">{top_tag}</div>
+      <div class="kpi-label">🧑‍💻 N1 — SUPORTE REMOTO</div>
+      <div class="kpi-value">{total_n1:,}</div>
     </div>
-    <div class="kpi-card">
-      <div class="kpi-label">🔢 VOLUME DA LÍDER</div>
-      <div class="kpi-value">{top_qtd:,}</div>
+    <div class="kpi-card n2">
+      <div class="kpi-label">🛠️ N2 — CAMPO ({pct_n2:.1f}%)</div>
+      <div class="kpi-value">{total_n2:,}</div>
     </div>
   </div>
 
   <div class="grid2">
-    <div class="bloco">
-      <h2>📊 Top 20 Tags por Volume</h2>
-      {bar_html}
-    </div>
-    <div class="bloco">
-      <h2>🥧 Top 10 (proporção)</h2>
-      {pie_html}
-    </div>
+    <div class="bloco">{bar_n1 or ""}</div>
+    <div class="bloco">{bar_n2 or ""}</div>
   </div>
 
-  <div class="bloco">
-    <h2>🗂️ Todas as Tags</h2>
-    <table class="tabela">
-      <thead>
-        <tr><th>Tag</th>
-            <th style="text-align:right">Quantidade</th></tr>
-      </thead>
-      <tbody>
-        {linhas}
-      </tbody>
-    </table>
+  <div class="grid2">
+    <div class="bloco">
+      <h2>🧑‍💻 N1 — Suporte Remoto ({len(df_n1)} tags)</h2>
+      {tabela_n1}
+    </div>
+    <div class="bloco">
+      <h2 style="color:{LARANJA_LOGO};">🛠️ N2 — Campo ({len(df_n2)} tags)</h2>
+      {tabela_n2}
+    </div>
   </div>
 
   <div class="rodape">
+    🥇 Tag líder geral: <b>{top_tag}</b> ·
     Gerado em {datetime.now():%d/%m/%Y %H:%M}
     {mascote_html}
   </div>
@@ -1202,18 +1205,22 @@ def _criar_dashboard_html_tags(df_tags, col_tag, col_qtd,
 
 
 def render_exportacao_tags(df_view, col_tag, col_qtd):
-    """Bloco de exportação específico para o modo agregado (Tag/Quantidade)."""
+    """
+    Bloco de exportação específico para o modo agregado (Tag/Quantidade).
+    Espera que df_view já tenha a coluna 'Nível' preenchida (N1/N2).
+    """
     st.markdown("### 🖼️ Exportação do Resumo de Tags")
     st.caption(
-        "Gera um HTML com apenas o resumo de tags: volume total, "
-        "top 20 em barras, top 10 em pizza e tabela completa."
+        "Gera um HTML com o resumo de tags dividido em **N1 (Suporte Remoto)** "
+        "e **N2 (Campo)**: KPIs, top 20 em barras lado a lado e tabelas "
+        "completas para cada nível."
     )
     try:
         html = _criar_dashboard_html_tags(df_view, col_tag, col_qtd)
         st.download_button(
             "⬇️ Exportar Resumo de Tags em HTML",
             data=html,
-            file_name="resumo_tags_n1.html",
+            file_name="resumo_tags_n1_n2.html",
             mime="text/html",
             use_container_width=True,
         )
@@ -1223,24 +1230,7 @@ def render_exportacao_tags(df_view, col_tag, col_qtd):
         )
     except Exception as exc:
         st.error(f"❌ Não foi possível gerar o HTML: {exc}")
-    # --- HTML com identidade visual ----------------------------------------
-    with col2:
-        st.markdown("##### 🌐 HTML (mesmo layout do dashboard)")
-        try:
-            html = _criar_dashboard_html(df_base, os_df=os_df)
-            st.download_button(
-                "⬇️ Exportar HTML — Visual Completo",
-                data=html,
-                file_name="dashboard_suporte_n1.html",
-                mime="text/html",
-                use_container_width=True,
-            )
-            st.caption(
-                "Abra no Chrome/Edge → **Ctrl+P** → **Salvar como PDF** "
-                "para gerar uma versão em PDF com o mesmo visual."
-            )
-        except Exception as exc:
-            st.error(f"❌ Não foi possível gerar o HTML: {exc}")
+
 
 # ===========================================================================
 # DASHBOARD DE O.S.
@@ -1291,11 +1281,11 @@ def render_dashboard_os(df_base):
                      color_continuous_scale="Oranges")
         fig.update_layout(
             title="Tipos de O.S.",
-            yaxis={"categoryorder": "total ascending"},
+            yaxis={"categoryorder": "total ascending", "automargin": True},
             showlegend=False, coloraxis_showscale=False,
-            margin=dict(l=10, r=10, t=55, b=10), height=500,
+            margin=dict(l=20, r=80, t=55, b=10), height=500,
         )
-        fig.update_traces(textposition="outside")
+        fig.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
@@ -1307,11 +1297,11 @@ def render_dashboard_os(df_base):
                          color_continuous_scale="Oranges")
             fig.update_layout(
                 title="O.S. por Analista",
-                yaxis={"categoryorder": "total ascending"},
+                yaxis={"categoryorder": "total ascending", "automargin": True},
                 showlegend=False, coloraxis_showscale=False,
-                margin=dict(l=10, r=10, t=55, b=10), height=500,
+                margin=dict(l=20, r=80, t=55, b=10), height=500,
             )
-            fig.update_traces(textposition="outside")
+            fig.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig, use_container_width=True)
 
     if "Status" in os_df.columns:
@@ -1353,7 +1343,7 @@ def render_dashboard_os(df_base):
 
 
 # ===========================================================================
-# MODO AGREGADO (Tag, Quantidade, %)
+# MODO AGREGADO (Tag/Quantidade/%)
 # ===========================================================================
 def render_modo_agregado(df: pd.DataFrame, agregados: dict):
     render_banner_marca()
@@ -1366,11 +1356,20 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
     col_tag = agregados["tag"]
     col_qtd = agregados["qtd"]
 
+    # --- Limpeza ---------------------------------------------------------
     df_view = df.copy()
     df_view[col_qtd] = pd.to_numeric(df_view[col_qtd], errors="coerce")
-    df_view = df_view.dropna(subset=[col_qtd]).sort_values(col_qtd,
-                                                          ascending=False)
+    df_view[col_tag] = df_view[col_tag].astype(str).str.strip()
+    df_view = df_view[
+        ~df_view[col_tag].str.lower().isin(
+            ["", "nan", "none", "null", "-", "n/a", "na"]
+        )
+    ]
+    df_view = (df_view.dropna(subset=[col_qtd])
+                      .sort_values(col_qtd, ascending=False)
+                      .reset_index(drop=True))
 
+    # --- Classificação N1 x N2 ------------------------------------------
     tags_unicas = df_view[col_tag].dropna().astype(str).unique().tolist()
     tags_n2 = selecionar_tags_n2(tags_unicas, chave_widget="tags_n2_agregado")
     df_view["Nível"] = df_view[col_tag].apply(
@@ -1381,8 +1380,8 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
     df_n2 = df_view[df_view["Nível"] == "N2 (Campo)"]
 
     total = int(df_view[col_qtd].sum())
-    total_n1 = int(df_n1[col_qtd].sum())
-    total_n2 = int(df_n2[col_qtd].sum())
+    total_n1 = int(df_n1[col_qtd].sum()) if len(df_n1) else 0
+    total_n2 = int(df_n2[col_qtd].sum()) if len(df_n2) else 0
     pct_n2 = (total_n2 / total * 100) if total else 0.0
     top_tag = df_view.iloc[0][col_tag] if len(df_view) else "-"
 
@@ -1401,7 +1400,7 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
 
         col_b, col_p = st.columns([2, 1])
         with col_b:
-            st.markdown(f"#### 🏷️ Distribuição — {titulo}")
+            st.markdown(f"#### 🏷️ Top 20 — {titulo}")
             top_n = df_nivel.head(20)
             fig = px.bar(
                 top_n, x=col_qtd, y=col_tag, orientation="h",
@@ -1409,12 +1408,15 @@ def render_modo_agregado(df: pd.DataFrame, agregados: dict):
                 color_continuous_scale=cor_escala,
             )
             fig.update_layout(
-                yaxis={"categoryorder": "total ascending"},
+                yaxis={"categoryorder": "total ascending",
+                       "automargin": True},
+                xaxis={"automargin": True},
                 showlegend=False, coloraxis_showscale=False,
                 xaxis_title="Quantidade", yaxis_title="",
-                margin=dict(l=10, r=10, t=30, b=10), height=480,
+                margin=dict(l=20, r=80, t=30, b=10),
+                height=max(480, len(top_n) * 32 + 120),
             )
-            fig.update_traces(textposition="outside")
+            fig.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig, use_container_width=True)
 
         with col_p:
@@ -1568,10 +1570,7 @@ if "Data" not in mapa_colunas:
         "❌ Não foi possível identificar a coluna de **Data** e o arquivo "
         "também não parece ser um resumo agregado.\n\n"
         "**Colunas encontradas:** " +
-        ", ".join(f"`{c}`" for c in df_raw.columns) +
-        "\n\n**Esperado:** uma coluna como `Data`, `Data_Abertura`, "
-        "`Criado_Em`, `Abertura` ou um arquivo agregado com "
-        "`Tag` + `Quantidade`."
+        ", ".join(f"`{c}`" for c in df_raw.columns)
     )
     st.stop()
 
@@ -1601,7 +1600,7 @@ st.caption(
 
 
 # ===========================================================================
-# KPIs
+# KPIs (modo detalhado)
 # ===========================================================================
 st.markdown("### 📊 Indicadores da Base")
 
@@ -1655,7 +1654,7 @@ st.markdown("---")
 
 
 # ===========================================================================
-# GRÁFICOS
+# GRÁFICOS (modo detalhado)
 # ===========================================================================
 if "Motivo" in df.columns:
     st.markdown("### 🔎 Distribuição por Motivo (N1 x N2)")
@@ -1689,12 +1688,12 @@ if "Motivo" in df.columns:
                      text="Quantidade", color="Quantidade",
                      color_continuous_scale=cor_escala)
         fig.update_layout(
-            yaxis={"categoryorder": "total ascending"},
+            yaxis={"categoryorder": "total ascending", "automargin": True},
             showlegend=False, coloraxis_showscale=False,
             xaxis_title="Nº de Chamados", yaxis_title="",
-            margin=dict(l=10, r=10, t=30, b=10),
+            margin=dict(l=20, r=80, t=30, b=10),
         )
-        fig.update_traces(textposition="outside")
+        fig.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig, use_container_width=True)
 
     aba_geral_m, aba_n1_m, aba_n2_m = st.tabs(
@@ -1747,12 +1746,12 @@ if "Analista" in df.columns:
                  text="Quantidade", color="Quantidade",
                  color_continuous_scale="Teal")
     fig.update_layout(
-        yaxis={"categoryorder": "total ascending"},
+        yaxis={"categoryorder": "total ascending", "automargin": True},
         showlegend=False, coloraxis_showscale=False,
         xaxis_title="Nº de Chamados", yaxis_title="",
-        margin=dict(l=10, r=10, t=30, b=10),
+        margin=dict(l=20, r=80, t=30, b=10),
     )
-    fig.update_traces(textposition="outside")
+    fig.update_traces(textposition="outside", cliponaxis=False)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1771,7 +1770,6 @@ render_dashboard_os(df)
 
 st.markdown("---")
 
-# O.S. para exportação
 os_df_export = None
 if "Motivo" in df.columns:
     os_df_export = df.loc[
