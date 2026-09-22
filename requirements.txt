@@ -1,4 +1,6 @@
-streamlit
-pandas
-plotly
-openpyxl
+[theme]
+primaryColor = "#00688A"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EAF6F8"
+textColor = "#12232E"
+font = "sans serif"
