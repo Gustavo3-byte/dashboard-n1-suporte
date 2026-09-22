@@ -890,7 +890,14 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
 
     from PIL import Image, ImageDraw, ImageFont
 
-    total = len(df_base)
+    # No modo agregado (Tag/Quantidade/%), cada linha representa uma categoria,
+    # não um atendimento individual. Nesse caso, o total correto é a soma da
+    # coluna de quantidade.
+    if "Data" not in df_base.columns and "Quantidade" in df_base.columns:
+        total = int(pd.to_numeric(df_base["Quantidade"], errors="coerce").fillna(0).sum())
+    else:
+        total = len(df_base)
+
     resolvidos = 0
     cancelados = 0
     if "Status" in df_base.columns:
@@ -908,9 +915,14 @@ def _criar_dashboard_png(df_base, os_df=None, titulo="Dashboard de Suporte N1"):
     ]
 
     figs = []
-    fig_volume = build_time_evolution_chart(df_base)
-    fig_volume.update_layout(title="Evolução de Volume", font=dict(size=16))
-    figs.append(("volume", fig_volume, 1800, 800))
+
+    # A evolução temporal só existe na base detalhada. Arquivos agregados
+    # (Tag/Quantidade/%) não possuem coluna Data e não devem chamar
+    # build_time_evolution_chart(), evitando KeyError: 'Data'.
+    if "Data" in df_base.columns:
+        fig_volume = build_time_evolution_chart(df_base)
+        fig_volume.update_layout(title="Evolução de Volume", font=dict(size=16))
+        figs.append(("volume", fig_volume, 1800, 800))
 
     if "Motivo" in df_base.columns:
         mc = df_base["Motivo"].value_counts().head(12).reset_index()
