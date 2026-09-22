@@ -5,4 +5,5 @@ openpyxl
 chardet
 xlrd
 odfpy
- 
+kaleido
+pillow
